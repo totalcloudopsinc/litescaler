@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lite-scaller-config
+data:
+  config.yaml: |
+    yandex_cloud:
+      service_account_key_file: /secrets/sa-key.json
+      node_group_id: REPLACE_WITH_DEV_NODE_GROUP_ID
+      cluster_id: REPLACE_WITH_DEV_CLUSTER_ID
+      master_endpoint: internal
+
+    kubernetes:
+      namespace: default
+      label_selectors:
+        - tag=demo
+
+    scaling:
+      pending_pod_threshold: 0
+      headroom: 0.10
+      max_size: 5
+      min_size: 0
+      scale_down_cooldown_polls: 3
+      poll_interval_seconds: 30
+      dry_run: true
+      node_capacity_fallback:
+        cpu: 2
+        memory_gib: 8

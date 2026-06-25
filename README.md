@@ -1,0 +1,168 @@
+# lite-scaler
+
+Scales a fixed-size Yandex Cloud Managed Kubernetes node group up when too many
+matching pods are stuck `Pending`.
+
+## How it works
+
+A **background loop** lists `Pending` pods in the configured namespace that match
+any configured label selector **and are still unscheduled** (no `nodeName`). Pods
+that are already on a node but stuck — `ImagePullBackOff`, crash loops, etc. — stay
+`phase=Pending` yet do *not* need more capacity, so they are ignored. If the count
+of genuinely unschedulable pods exceeds `pending_pod_threshold`
+(default `0`, i.e. a single Pending pod is enough), it sums their CPU/memory
+requests, **subtracts the unreserved capacity already available on Ready nodes in
+the group** (a node just added is `Ready` before the scheduler has placed the
+Pending pods onto it — counting its free space stops a second node being added for
+pods the first will absorb), divides the remaining demand by a node's allocatable
+capacity, adds `headroom` (15%), and resizes the node group to
+`current + nodes_needed` (capped at `max_size`). If existing free capacity already
+covers the demand, it does nothing.
+
+**Scale-down.** When no matching pod has been `Pending` for
+`scale_down_cooldown_polls` consecutive polls (default 3), the loop counts
+*empty* nodes in the managed node group — `Ready` nodes with zero scheduled pods
+matching the label selectors — and lowers the group size by that count, down to
+`min_size` (default 1; set 0 to allow an empty group). Because a Yandex
+`fixed_scale` group is resized by count, Yandex picks which node to drain
+(gracefully); we only shrink when matching workloads are fully idle, so any
+drained node is safe. Any `Pending` matching pod suppresses scale-down and
+resets the cooldown — scale-up always wins.
+
+**Scale once per pod.** The loop remembers the `Pending` pods it has already
+scaled for (by pod UID). On each poll it only considers pods it has *not* handled
+yet, so:
+
+- it won't add nodes again for the same pods while the previous cycle's nodes are
+  still being created, but
+- it *will* react to brand-new `Pending` pods immediately, even mid-provisioning.
+
+A handled pod is forgotten only once it **no longer exists at all** — not when it
+merely gets scheduled. A pod that lands on a node and then sticks in
+`ImagePullBackOff` leaves the unscheduled-`Pending` queue but keeps existing; if it
+were forgotten there it could re-enter the queue (node churn, re-scheduling) and
+look like brand-new demand, scaling again for a pod that can never run. Only pods
+that actually triggered a scale-up are remembered — below-threshold pods stay
+eligible so they can accumulate.
+
+**Wait for in-flight resizes (stability gate).** A `fixed_scale` group reports its
+*desired* size immediately, before the nodes actually join (or finish deleting).
+Acting on that unrealized size makes the scaler fight its own operation — adding a
+second node before the first arrives, or tearing down freshly-added nodes that pods
+haven't landed on yet. So before issuing **any** resize the loop checks that the
+group has reached its desired size (`Ready` nodes in the group == desired) and that
+the previous resize operation has finished; while a resize is in flight it waits and
+does nothing.
+
+The `POST /evaluate` endpoint is a **manual override**: you tell it exactly how many
+nodes to add, and it scales the group by that amount (still clamped to `max_size`).
+It does not consult the pending-pod queue — that automatic behavior stays in the
+background loop.
+
+## Configure
+
+Edit `config.yaml` (see the sample in the repo). Key fields:
+
+- `yandex_cloud.service_account_key_file` — path to a YC service-account JSON key.
+- `yandex_cloud.node_group_id` — the managed K8s node group to scale.
+- `yandex_cloud.cluster_id` — the Managed Kubernetes cluster id (used to fetch the
+  master endpoint and CA certificate).
+- `yandex_cloud.master_endpoint` — `internal` (default; the scaler runs as a pod
+  and reaches the master over the internal endpoint) or `external` (running
+  off-cluster).
+- `kubernetes.namespace` + `kubernetes.label_selectors` — which Pending pods count.
+- `scaling.max_size`, `min_size`, `pending_pod_threshold`, `headroom`,
+  `scale_down_cooldown_polls`, `poll_interval_seconds`, `dry_run`.
+
+### Cluster connection
+
+The scaler builds its Kubernetes connection entirely from the Yandex Cloud API —
+it does not read a kubeconfig file or use in-cluster service-account RBAC. On
+startup it calls the Managed Kubernetes API with the service-account key to fetch
+the master endpoint and CA certificate, and mints a YC IAM token (refreshed
+automatically before it expires) to authenticate every request.
+
+**Prerequisite — the service account needs two distinct grants:**
+
+- **`k8s.editor`** (cloud IAM) — to resize the node group. The scaler resizes via
+  the YC gRPC API (`NodeGroupService.Update`), so this is a cloud-level role, not
+  a Kubernetes one.
+- **`k8s.cluster-api.cluster-admin`** — granted to the SA as a YC IAM role, this
+  is what lets the minted IAM token call the Kubernetes API. The narrower
+  `viewer`/`editor` roles are **not** enough: they map to Kubernetes' `view`/`edit`
+  ClusterRoles, which only cover namespaced resources, whereas the scaler reads
+  cluster-scoped ones — `nodes` and pods across all namespaces.
+
+## Run locally
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+CONFIG_PATH=config.yaml .venv/bin/uvicorn app.api:app --reload
+```
+
+## Endpoints
+
+- `GET /healthz` — liveness.
+- `GET /status` — current config + last decision.
+- `POST /evaluate` — manually add a specific number of nodes (clamped to
+  `max_size`, unless `dry_run`). Requires a JSON body `{"nodes_to_add": N}` where
+  `N >= 1`; a missing or non-positive value returns `422`.
+
+```bash
+curl -X POST localhost:8000/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes_to_add": 3}'
+```
+
+## Build the image
+
+```bash
+./build.sh                      # lite-scaler:latest
+./build.sh lite-scaler v1.0    # custom name + tag
+```
+
+## Deploy to a cluster (Terraform + Kustomize)
+
+The `deploy/` directory does a one-click, per-environment install. The work is
+split by who needs the Yandex Cloud API and what is safe to keep in Git:
+
+- **Terraform** (`deploy/terraform/`) provisions the cloud bits — a dedicated
+  service account, its two IAM grants (`k8s.editor` +
+  `k8s.cluster-api.cluster-admin`, see [Cluster connection](#cluster-connection)),
+  the SA key, and the Kubernetes `Secret` (`lite-scaller-sa`) that carries it.
+  The cluster and node group are **pre-existing** — Terraform only references them.
+- **Kustomize** (`deploy/kustomize/`) owns the manifests — a `base/` (Deployment +
+  default `config.yaml`) plus one overlay per environment
+  (`overlays/{dev,prod}/`) that sets the per-env `config.yaml` and image tag.
+
+```
+deploy/
+  install.sh                 # terraform apply + kubectl apply -k
+  terraform/                 # SA, IAM bindings, key, kubernetes_secret
+    envs/{dev,prod}.tfvars
+  kustomize/
+    base/                    # deployment + base config.yaml
+    overlays/{dev,prod}/   # per-env config-patch.yaml + image tag
+```
+
+Per environment you edit `terraform/envs/<env>.tfvars`,
+`kustomize/overlays/<env>/config-patch.yaml`, that overlay's
+`kustomization.yaml`, and its `deployment-patch.yaml` (the `nodeSelector` that
+pins the scaler to a stable node — not the managed group) — replacing the
+`REPLACE_` placeholders. Then:
+
+```bash
+# Just authenticate the `yc` CLI as the operator. install.sh mints the YC token
+# and points kubectl at the cluster (get-credentials --external) for you.
+./deploy/install.sh prod plan     # terraform plan + offline kustomize build + best-effort dry-run
+./deploy/install.sh prod          # terraform apply + kubectl apply -k
+./deploy/install.sh prod destroy  # kubectl delete -k + terraform destroy (reverse order)
+```
+
+Full details and the rationale for the split are in [`deploy/README.md`](deploy/README.md).
+
+## Test
+
+```bash
+.venv/bin/pytest -q
+```

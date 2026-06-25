@@ -1,0 +1,49 @@
+# Run the scaler as a pod, authenticating to the cluster via the YC service
+# account key (no in-cluster RBAC needed). The SA must hold a Kubernetes role on
+# the cluster (e.g. k8s.cluster-api.cluster-admin) plus node-group edit rights.
+#
+#   kubectl create secret generic lite-scaller-sa \
+#     --from-file=sa-key.json=./sa-key.json -n kube-system
+#
+#   kubectl create configmap lite-scaler-config \
+#     --from-file=config.yaml=./config.yaml -n kube-system
+#
+#   kubectl apply -f examples/deployment.yaml
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lite-scaler
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lite-scaler
+  template:
+    metadata:
+      labels:
+        app: lite-scaler
+    spec:
+      containers:
+        - name: lite-scaler
+          image: cr.yandex/crph9fp6537285vojlnc/lite-scaller:latest
+          env:
+            - name: CONFIG_PATH
+              value: /config/config.yaml
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: sa-key
+              mountPath: /secrets
+              readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: sa-key
+          secret:
+            secretName: lite-scaller-sa   # sa-key.json
+        - name: config
+          configMap:
+            name: lite-scaller-config     # config.yaml

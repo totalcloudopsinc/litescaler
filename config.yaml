@@ -1,0 +1,22 @@
+yandex_cloud:
+  service_account_key_file: /secrets/sa-key.json
+  node_group_id: catu7jtfk71c12dicgl8
+  cluster_id: catxxxxxxxxxxxxxxxxx   # REQUIRED: set your Managed Kubernetes cluster id
+  master_endpoint: internal          # internal (pod in-cluster) | external (off-cluster)
+
+kubernetes:
+  namespace: default
+  label_selectors:                  # pod counts if it matches ANY of these (OR)
+    - tag=demo
+
+scaling:
+  pending_pod_threshold: 0          # act when (new) pending count > this; 0 = any single pending pod
+  headroom: 0.10                    # +10%
+  max_size: 20                      # hard cap on node-group size
+  min_size: 0                       # 0 allows scaling to zero nodes
+  scale_down_cooldown_polls: 3      # idle polls before removing empty nodes
+  poll_interval_seconds: 30
+  dry_run: false
+  node_capacity_fallback:           # used only if no Ready node found
+    cpu: 2
+    memory_gib: 8
