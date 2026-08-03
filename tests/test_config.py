@@ -202,6 +202,17 @@ def test_yandex_cloud_config_master_endpoint_accepts_external():
     assert cfg.master_endpoint == "external"
 
 
+def test_log_level_defaults_to_info_and_rejects_unknown():
+    import pytest
+    from pydantic import ValidationError
+    from app.config import ScalingConfig
+
+    assert ScalingConfig(max_size=5).log_level == "INFO"
+    assert ScalingConfig(max_size=5, log_level="DEBUG").log_level == "DEBUG"
+    with pytest.raises(ValidationError):
+        ScalingConfig(max_size=5, log_level="verbose")
+
+
 def test_kubernetes_config_no_longer_has_kubeconfig():
     from app.config import KubernetesConfig
     assert "kubeconfig" not in KubernetesConfig.model_fields

@@ -29,6 +29,7 @@ class ScalingConfig(BaseModel):
     headroom: float = 0.15
     poll_interval_seconds: int = 30
     dry_run: bool = False
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     min_size: int = Field(default=1, ge=0)
     scale_down_cooldown_polls: int = Field(default=3, ge=1)
     node_capacity_fallback: NodeCapacityFallback = NodeCapacityFallback(

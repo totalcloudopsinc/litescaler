@@ -30,11 +30,25 @@
    что добавленный узел становится `Ready` раньше, чем планировщик размещает на
    нём ожидающие поды; учёт его свободного места не даёт добавить второй узел под
    поды, которые поместятся на первом;
-3. делит оставшийся спрос на ёмкость одного узла, добавляет запас `headroom`
-   (по умолчанию 15 %);
+3. делит оставшийся спрос на ёмкость одного узла **управляемой группы**, добавляет
+   запас `headroom` (по умолчанию 15 %);
 4. меняет размер группы до `current + nodes_needed` (с ограничением `max_size`).
 
 Если свободной ёмкости уже достаточно, сервис ничего не делает.
+
+### Учитывается только управляемая группа
+
+Все показатели ёмкости берутся исключительно с узлов с меткой
+`yandex.cloud/node-group-id=<node_group_id>`: размер одного узла (делитель
+спроса), вычитаемая свободная ёмкость, проверка готовности группы и подсчёт
+пустых узлов при масштабировании вниз. В кластере с несколькими нод-группами узел
+чужой группы (например, небольшой системной) не должен задавать делитель — иначе
+группа будет расширена с ошибкой во столько раз, во сколько различаются размеры
+узлов. Узлы одной группы Yandex создаются по одному шаблону, то есть одинаковы;
+если они всё же различаются, берётся **наименьший** — так ошибка возможна только
+в сторону лишнего узла, а не нехватки. Если в группе вообще нет узлов в состоянии
+`Ready` (масштабирована в ноль), используется `node_capacity_fallback` и пишется
+предупреждение в лог.
 
 ### Масштабирование вниз
 
@@ -182,6 +196,36 @@ TCP 443 (реестр образов) и стандартный внутрикл
   учитывать (под учитывается, если совпадает с **любым** селектором — логика OR).
 - `scaling.max_size`, `min_size`, `pending_pod_threshold`, `headroom`,
   `scale_down_cooldown_polls`, `poll_interval_seconds`, `dry_run`.
+- `scaling.log_level` — `INFO` (по умолчанию) логирует каждый шаг принятия
+  решения; `DEBUG` добавляет разбивку по каждому поду и каждому узлу.
+
+### Разбор решений по логам
+
+Каждый шаг, влияющий на решение, пишется в лог, поэтому установку с
+`dry_run: true` можно разобрать по одному логу. Один цикл опроса на уровне `INFO`
+читается сверху вниз:
+
+```
+--- evaluate: group=cat-ml-gpu ns=default selectors=['tag=demo'] dry_run=True
+Pending pods in ns=default: 3 total, 3 match ['tag=demo'], 3 still unscheduled
+Pending pods: 3 unscheduled, 0 already accounted for by an earlier resize, 3 new for this decision
+Ready nodes in group cat-ml-gpu: 2 (cluster has 4 nodes in total)
+Node group state: desired size 2, ready nodes 2, resize operation in progress: False
+New pending pods request 24000m cpu / 48.00Gi memory in total
+Node capacity of group cat-ml-gpu: 16000m cpu / 64.00Gi memory per node (from 2 Ready node(s))
+Free capacity across 2 Ready node(s) of group cat-ml-gpu: 20000m cpu / 96.00Gi memory
+decide: pending=3 (threshold 0), requests 24000m cpu / 48.00Gi memory, free in group 20000m ...
+decide: unmet demand after free capacity: 4000m cpu / 0.00Gi memory -> 0.25 nodes by cpu, 0.00 nodes by memory; max * (1 + 0.10 headroom) = 0.28 -> ceil = 1 nodes needed
+decide: 2 + 1 = 3 wanted, capped by max_size 20 -> target 3 (+1)
+Decision: 3 pending pods need ~1 nodes (+10% headroom); scaling 2 -> 3
+dry_run enabled; skipping resize to 3
+```
+
+На уровне `DEBUG` дополнительно выводятся: каждый ожидающий под с его `requests`,
+каждый узел группы с разбивкой allocatable / запрошено / свободно, имена узлов за
+каждым счётчиком, а также какие поды запомнены как обработанные и какие "забыты".
+Всё, что может незаметно исказить решение — отсутствие `Ready`-узлов в группе,
+узел без allocatable, разные размеры узлов внутри группы — пишется как `WARNING`.
 
 ### Подключение к кластеру
 

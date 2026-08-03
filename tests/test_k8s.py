@@ -292,3 +292,52 @@ def test_group_free_capacity_zero_without_group_nodes():
     client = _kube_with(nodes, [])
     assert client.group_free_capacity("grp-1") == (0, 0)
     client._v1.list_pod_for_all_namespaces.assert_not_called()
+
+
+def test_get_node_capacity_ignores_other_node_groups():
+    nodes = [
+        _alloc_group_node("other", 2000, 4 * 1024**3, group="grp-2"),
+        _alloc_group_node("mine", 16000, 64 * 1024**3, group="grp-1"),
+    ]
+    client = _kube_with(nodes, [])
+    assert client.get_node_capacity("grp-1") == (16000, 64 * 1024**3)
+
+
+def test_get_node_capacity_ignores_not_ready_group_nodes():
+    nodes = [
+        _alloc_group_node("a", 2000, 4 * 1024**3, group="grp-1", ready=False),
+        _alloc_group_node("b", 8000, 32 * 1024**3, group="grp-1"),
+    ]
+    client = _kube_with(nodes, [])
+    assert client.get_node_capacity("grp-1") == (8000, 32 * 1024**3)
+
+
+def test_get_node_capacity_uses_smallest_node_of_a_mixed_group():
+    nodes = [
+        _alloc_group_node("big", 16000, 64 * 1024**3, group="grp-1"),
+        _alloc_group_node("small", 4000, 8 * 1024**3, group="grp-1"),
+    ]
+    client = _kube_with(nodes, [])
+    assert client.get_node_capacity("grp-1") == (4000, 8 * 1024**3)
+
+
+def test_get_node_capacity_none_without_group_nodes():
+    nodes = [_alloc_group_node("other", 4000, 8 * 1024**3, group="grp-2")]
+    client = _kube_with(nodes, [])
+    assert client.get_node_capacity("grp-1") is None
+
+
+def test_get_node_capacity_skips_nodes_reporting_no_allocatable():
+    zero = SimpleNamespace(
+        metadata=SimpleNamespace(name="broken", labels={NODE_GROUP_LABEL: "grp-1"}),
+        status=SimpleNamespace(
+            allocatable=None,
+            conditions=[SimpleNamespace(type="Ready", status="True")],
+        ),
+    )
+    good = _alloc_group_node("ok", 4000, 8 * 1024**3, group="grp-1")
+
+    assert _kube_with([zero, good], []).get_node_capacity("grp-1") == (
+        4000, 8 * 1024**3
+    )
+    assert _kube_with([zero], []).get_node_capacity("grp-1") is None

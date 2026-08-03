@@ -114,6 +114,20 @@ def test_evaluate_uses_capacity_fallback_when_no_node(monkeypatch):
     assert decision.target_size == 5
 
 
+def test_evaluate_reads_capacity_of_the_target_node_group(monkeypatch):
+    config = _config()
+    svc, kube, yc = _service(config, _pods(4), (4000, 16 * 1024**3), 2)
+    monkeypatch.setattr(
+        "app.service.sum_pod_requests", lambda p: (8000, 1 * 1024**3)
+    )
+
+    svc.evaluate()
+
+    kube.get_node_capacity.assert_called_once_with(
+        config.yandex_cloud.node_group_id
+    )
+
+
 def test_evaluate_does_not_rescale_same_pending_pods(monkeypatch):
     config = _config()
     pods = _pods(4)

@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 
 def _build_service() -> ScalerService:
     config = load_config(os.environ.get("CONFIG_PATH", "config.yaml"))
+    logging.getLogger("app").setLevel(config.scaling.log_level)
+    logger.info(
+        "Starting lite-scaler: group=%s dry_run=%s log_level=%s "
+        "poll_interval=%ds",
+        config.yandex_cloud.node_group_id, config.scaling.dry_run,
+        config.scaling.log_level, config.scaling.poll_interval_seconds,
+    )
     return ScalerService.from_config(config)
 
 

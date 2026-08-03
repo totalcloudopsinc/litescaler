@@ -23,6 +23,7 @@ data:
       scale_down_cooldown_polls: 3
       poll_interval_seconds: 30
       dry_run: false
+      log_level: INFO
       node_capacity_fallback:
         cpu: 2
         memory_gib: 8

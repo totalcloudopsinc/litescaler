@@ -14,8 +14,8 @@ of genuinely unschedulable pods exceeds `pending_pod_threshold`
 requests, **subtracts the unreserved capacity already available on Ready nodes in
 the group** (a node just added is `Ready` before the scheduler has placed the
 Pending pods onto it — counting its free space stops a second node being added for
-pods the first will absorb), divides the remaining demand by a node's allocatable
-capacity, adds `headroom` (15%), and resizes the node group to
+pods the first will absorb), divides the remaining demand by the allocatable
+capacity of a node **of the managed group**, adds `headroom` (15%), and resizes the node group to
 `current + nodes_needed` (capped at `max_size`). If existing free capacity already
 covers the demand, it does nothing.
 
@@ -45,6 +45,18 @@ look like brand-new demand, scaling again for a pod that can never run. Only pod
 that actually triggered a scale-up are remembered — below-threshold pods stay
 eligible so they can accumulate.
 
+**Only the managed group is measured.** Every capacity number comes from nodes
+labeled `yandex.cloud/node-group-id=<node_group_id>`: the per-node size used to
+divide the demand, the free capacity subtracted from it, the readiness gate, and
+the empty-node count for scale-down. In a cluster with several node groups a
+node of another group (a small system group, say) must never set the divisor —
+that would over- or under-provision this group by whatever the size ratio
+happens to be. Nodes of one Yandex node group share an instance template, so
+they are the same size; if they ever disagree, the **smallest** is used, which
+can only err toward adding a node too many rather than too few. If the group has
+no `Ready` node at all (scaled to zero), `node_capacity_fallback` is used and a
+warning is logged.
+
 **Wait for in-flight resizes (stability gate).** A `fixed_scale` group reports its
 *desired* size immediately, before the nodes actually join (or finish deleting).
 Acting on that unrealized size makes the scaler fight its own operation — adding a
@@ -73,6 +85,36 @@ Edit `config.yaml` (see the sample in the repo). Key fields:
 - `kubernetes.namespace` + `kubernetes.label_selectors` — which Pending pods count.
 - `scaling.max_size`, `min_size`, `pending_pod_threshold`, `headroom`,
   `scale_down_cooldown_polls`, `poll_interval_seconds`, `dry_run`.
+- `scaling.log_level` — `INFO` (default) logs every decision step; `DEBUG` adds
+  per-pod requests and per-node allocatable/requested/free breakdowns. See
+  [Inspecting decisions](#inspecting-decisions).
+
+### Inspecting decisions
+
+Every step that feeds a decision is logged, so a `dry_run: true` deployment can be
+audited from the log alone. One poll at `INFO` reads top to bottom:
+
+```
+--- evaluate: group=cat-ml-gpu ns=default selectors=['tag=demo'] dry_run=True
+Pending pods in ns=default: 3 total, 3 match ['tag=demo'], 3 still unscheduled
+Pending pods: 3 unscheduled, 0 already accounted for by an earlier resize, 3 new for this decision
+Ready nodes in group cat-ml-gpu: 2 (cluster has 4 nodes in total)
+Node group state: desired size 2, ready nodes 2, resize operation in progress: False
+New pending pods request 24000m cpu / 48.00Gi memory in total
+Node capacity of group cat-ml-gpu: 16000m cpu / 64.00Gi memory per node (from 2 Ready node(s))
+Free capacity across 2 Ready node(s) of group cat-ml-gpu: 20000m cpu / 96.00Gi memory
+decide: pending=3 (threshold 0), requests 24000m cpu / 48.00Gi memory, free in group 20000m ...
+decide: unmet demand after free capacity: 4000m cpu / 0.00Gi memory -> 0.25 nodes by cpu, 0.00 nodes by memory; max * (1 + 0.10 headroom) = 0.28 -> ceil = 1 nodes needed
+decide: 2 + 1 = 3 wanted, capped by max_size 20 -> target 3 (+1)
+Decision: 3 pending pods need ~1 nodes (+10% headroom); scaling 2 -> 3
+dry_run enabled; skipping resize to 3
+```
+
+`log_level: DEBUG` additionally names each pending pod with its requests, each
+group node with its allocatable/requested/free split, the node names behind every
+count, and which pods are remembered or forgotten. Anything that could silently
+skew a decision — no `Ready` node in the group, a node reporting no allocatable,
+mixed node sizes within the group — is a `WARNING`.
 
 ### Cluster connection
 

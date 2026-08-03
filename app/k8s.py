@@ -17,6 +17,14 @@ _MEM_MULTIPLIERS = {
 NODE_GROUP_LABEL = "yandex.cloud/node-group-id"
 
 
+def format_cpu(millicores: int) -> str:
+    return f"{millicores}m"
+
+
+def format_mem(num_bytes: int) -> str:
+    return f"{num_bytes / 1024**3:.2f}Gi"
+
+
 def parse_cpu_to_millicores(value) -> int:
     if value is None:
         return 0
@@ -123,24 +131,51 @@ class KubeClient:
         pods = self._v1.list_namespaced_pod(
             namespace=namespace, field_selector="status.phase=Pending"
         ).items
-        return [
-            p
-            for p in pods
-            if pod_matches_selectors(p, selectors) and pod_is_waiting_for_node(p)
-        ]
+        matching = [p for p in pods if pod_matches_selectors(p, selectors)]
+        unscheduled = [p for p in matching if pod_is_waiting_for_node(p)]
+        logger.info(
+            "Pending pods in ns=%s: %d total, %d match %s, %d still unscheduled",
+            namespace, len(pods), len(matching), selectors, len(unscheduled),
+        )
+        for pod in unscheduled:
+            cpu, mem = sum_pod_requests([pod])
+            logger.debug(
+                "  pending pod %s requests %s cpu / %s memory",
+                pod.metadata.name, format_cpu(cpu), format_mem(mem),
+            )
+        return unscheduled
 
     def matching_pod_uids(self, namespace: str, selectors: list[str]) -> set[str]:
         pods = self._v1.list_namespaced_pod(namespace=namespace).items
-        return {p.metadata.uid for p in pods if pod_matches_selectors(p, selectors)}
+        uids = {p.metadata.uid for p in pods if pod_matches_selectors(p, selectors)}
+        logger.debug(
+            "Pods matching %s in ns=%s: %d of %d pods currently exist",
+            selectors, namespace, len(uids), len(pods),
+        )
+        return uids
 
     def ready_group_node_count(self, node_group_id: str) -> int:
         nodes = self._v1.list_node().items
-        return len(nodes_in_group(nodes, node_group_id))
+        group = nodes_in_group(nodes, node_group_id)
+        logger.info(
+            "Ready nodes in group %s: %d (cluster has %d nodes in total)",
+            node_group_id, len(group), len(nodes),
+        )
+        logger.debug(
+            "  group %s node names: %s",
+            node_group_id, [n.metadata.name for n in group] or "none",
+        )
+        return len(group)
 
     def group_free_capacity(self, node_group_id: str) -> tuple[int, int]:
         nodes = self._v1.list_node().items
         group = nodes_in_group(nodes, node_group_id)
         if not group:
+            logger.warning(
+                "Free capacity: no Ready node labeled %s=%s among %d cluster "
+                "nodes; assuming zero free capacity",
+                NODE_GROUP_LABEL, node_group_id, len(nodes),
+            )
             return (0, 0)
 
         used_cpu: dict[str, int] = {}
@@ -160,25 +195,77 @@ class KubeClient:
         for node in group:
             alloc = node.status.allocatable or {}
             name = node.metadata.name
-            free_cpu += max(
-                0, parse_cpu_to_millicores(alloc.get("cpu")) - used_cpu.get(name, 0)
+            alloc_cpu = parse_cpu_to_millicores(alloc.get("cpu"))
+            alloc_mem = parse_memory_to_bytes(alloc.get("memory"))
+            node_free_cpu = max(0, alloc_cpu - used_cpu.get(name, 0))
+            node_free_mem = max(0, alloc_mem - used_mem.get(name, 0))
+            logger.debug(
+                "  node %s: allocatable %s / %s, requested %s / %s, free %s / %s",
+                name,
+                format_cpu(alloc_cpu), format_mem(alloc_mem),
+                format_cpu(used_cpu.get(name, 0)), format_mem(used_mem.get(name, 0)),
+                format_cpu(node_free_cpu), format_mem(node_free_mem),
             )
-            free_mem += max(
-                0, parse_memory_to_bytes(alloc.get("memory")) - used_mem.get(name, 0)
-            )
+            free_cpu += node_free_cpu
+            free_mem += node_free_mem
+        logger.info(
+            "Free capacity across %d Ready node(s) of group %s: %s cpu / %s memory",
+            len(group), node_group_id, format_cpu(free_cpu), format_mem(free_mem),
+        )
         return (free_cpu, free_mem)
 
-    def get_node_capacity(self) -> tuple[int, int] | None:
+    def get_node_capacity(self, node_group_id: str) -> tuple[int, int] | None:
         nodes = self._v1.list_node().items
-        for node in nodes:
-            if not node_is_ready(node):
-                continue
-            alloc = node.status.allocatable or {}
-            return (
-                parse_cpu_to_millicores(alloc.get("cpu")),
-                parse_memory_to_bytes(alloc.get("memory")),
+        group = nodes_in_group(nodes, node_group_id)
+        if not group:
+            logger.warning(
+                "Node capacity: no Ready node labeled %s=%s among %d cluster nodes",
+                NODE_GROUP_LABEL, node_group_id, len(nodes),
             )
-        return None
+            return None
+
+        sizes: list[tuple[int, int]] = []
+        for node in group:
+            alloc = node.status.allocatable or {}
+            cpu = parse_cpu_to_millicores(alloc.get("cpu"))
+            mem = parse_memory_to_bytes(alloc.get("memory"))
+            if cpu <= 0 or mem <= 0:
+                logger.warning(
+                    "Node capacity: node %s of group %s reports unusable "
+                    "allocatable (%s cpu / %s memory); ignoring it",
+                    node.metadata.name, node_group_id,
+                    format_cpu(cpu), format_mem(mem),
+                )
+                continue
+            logger.debug(
+                "  node %s of group %s: allocatable %s cpu / %s memory",
+                node.metadata.name, node_group_id, format_cpu(cpu), format_mem(mem),
+            )
+            sizes.append((cpu, mem))
+
+        if not sizes:
+            logger.warning(
+                "Node capacity: no node of group %s reports usable allocatable",
+                node_group_id,
+            )
+            return None
+
+        cpu = min(c for c, _ in sizes)
+        mem = min(m for _, m in sizes)
+        if len(set(sizes)) > 1:
+            logger.warning(
+                "Node capacity: group %s has %d distinct node sizes %s; sizing "
+                "on the smallest (%s cpu / %s memory)",
+                node_group_id, len(set(sizes)),
+                [(format_cpu(c), format_mem(m)) for c, m in sorted(set(sizes))],
+                format_cpu(cpu), format_mem(mem),
+            )
+        logger.info(
+            "Node capacity of group %s: %s cpu / %s memory per node "
+            "(from %d Ready node(s))",
+            node_group_id, format_cpu(cpu), format_mem(mem), len(sizes),
+        )
+        return (cpu, mem)
 
     def empty_group_node_count(
         self, namespace: str, selectors: list[str], node_group_id: str
@@ -193,4 +280,12 @@ class KubeClient:
             return 0
         pods = self._v1.list_namespaced_pod(namespace=namespace).items
         occupied = occupied_node_names(pods, selectors)
-        return sum(1 for n in group_nodes if n.metadata.name not in occupied)
+        empty = [n.metadata.name for n in group_nodes if n.metadata.name not in occupied]
+        logger.info(
+            "Group %s has %d Ready node(s), %d busy with pods matching %s, "
+            "%d empty",
+            node_group_id, len(group_nodes),
+            len(group_nodes) - len(empty), selectors, len(empty),
+        )
+        logger.debug("  empty nodes: %s", empty or "none")
+        return len(empty)

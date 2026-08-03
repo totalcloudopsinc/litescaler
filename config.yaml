@@ -17,6 +17,7 @@ scaling:
   scale_down_cooldown_polls: 3      # idle polls before removing empty nodes
   poll_interval_seconds: 30
   dry_run: false
-  node_capacity_fallback:           # used only if no Ready node found
+  log_level: INFO                   # DEBUG adds per-pod / per-node detail
+  node_capacity_fallback:           # used only if the node group has no Ready node
     cpu: 2
     memory_gib: 8
