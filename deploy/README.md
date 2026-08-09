@@ -8,6 +8,29 @@ the manifests: a `base/` plus one overlay per environment that sets the per-env
 
 The cluster and node group are **pre-existing** — Terraform references them.
 
+## Deploy via GitHub Actions (primary)
+
+Day-to-day deploys go through CI, like BotsService. Two workflows build+push the
+image and apply the matching Kustomize overlay on the self-hosted `[bot]` runner
+(which is expected to already have `kubectl` pointed at the cluster):
+
+| Workflow | Env / namespace | Triggers |
+|:---------|:----------------|:---------|
+| `.github/workflows/deploy-k8s.yaml` | dev / `kube-system` | manual `workflow_dispatch`; push to `dev`; or a push whose commit message contains `deploy to dev` (not a `Merge`) |
+| `.github/workflows/deploy-k8s-prod.yaml` | prod / `kube-system` | manual `workflow_dispatch`; a PR merged into `master`; or a push whose message contains `deploy to prod` (not a `Merge`) |
+
+Image tag = commit SHA (dev) / `prod-<sha>` (prod), pinned into the rendered
+manifest at deploy time.
+
+**dry_run per deploy.** Each workflow has a `workflow_dispatch` input `dry_run`
+with `overlay-default | true | false`. `overlay-default` keeps the overlay's
+baked value (dev = `true`, prod = `false`); `true`/`false` override it for that
+run (the scaler logs decisions but performs no resize when `dry_run: true`).
+Auto-triggered (push/PR) deploys always use the overlay default.
+
+Terraform below is a **one-time bootstrap** per environment (service account +
+IAM + SA-key Secret); CI does not run it.
+
 ```
 deploy/
   install.sh                 # wrapper: terraform apply + kubectl apply -k
@@ -49,6 +72,10 @@ export YC_TOKEN="$(yc iam create-token)"          # or set TF_VAR_yc_service_acc
 ./deploy/install.sh prod plan     # terraform plan + offline kustomize build + best-effort dry-run
 ./deploy/install.sh prod          # terraform apply + kubectl apply -k
 ./deploy/install.sh prod destroy  # kubectl delete -k + terraform destroy (reverse order)
+
+# Override scaling.dry_run for a manual apply/plan (omit to keep the overlay value):
+./deploy/install.sh dev  --dry-run     # force dry_run: true
+./deploy/install.sh prod --no-dry-run  # force dry_run: false
 ```
 
 ## Why the split

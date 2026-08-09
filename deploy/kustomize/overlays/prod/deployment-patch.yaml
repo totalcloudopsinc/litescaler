@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lite-scaler
+spec:
+  template:
+    spec:
+      # Pin to a STABLE node that the scaler never resizes (not the managed
+      # group it scales), or a scale-down could drain the scaler's own node.
+      nodeSelector:
+        workload: infra
+      containers:
+        - name: lite-scaler
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
