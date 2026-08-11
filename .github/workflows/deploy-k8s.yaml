@@ -1,0 +1,85 @@
+name: Deploy lite-scaler to k8s dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Scaler dry_run for this deploy (overlay-default keeps the overlay's value)"
+        type: choice
+        options:
+          - overlay-default
+          - "true"
+          - "false"
+        default: overlay-default
+  push:
+    branches:
+      - "**"
+
+env:
+  REGISTRY: cr.yandex
+  REPO: cr.yandex/crph9fp6537285vojlnc/lite-scaller
+  IMAGE_TAG: ${{ github.sha }}
+  ENVIRONMENT: dev
+  OVERLAY: deploy/kustomize/overlays/dev
+
+jobs:
+  deploy_dev:
+    # dev deploy triggers, mirroring BotsService:
+    #   - manual workflow_dispatch, OR
+    #   - push to the `dev` branch, OR
+    #   - any push whose commit message contains `deploy to dev` (not a Merge).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
+      (github.event_name == 'push' && contains(github.event.head_commit.message, 'deploy to dev') && !startsWith(github.event.head_commit.message, 'Merge'))
+
+    runs-on: [bot]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Persistent builder on the self-hosted runner: keeps BuildKit state
+      # (incl. RUN cache mounts) across runs.
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          name: lite-scaler-builder
+          cleanup: false
+
+      - name: Build and Push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          push: true
+          tags: |
+            ${{ env.REPO }}:latest
+            ${{ env.REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.REPO }}:buildcache,mode=max,compression=zstd,image-manifest=true,oci-mediatypes=true
+
+      # Deploy the dev overlay. kubectl on the [bot] runner is expected to be
+      # pointed at the cluster already (same assumption BotsService makes for
+      # helm). The rendered manifest gets the freshly-built image pinned by SHA,
+      # and dry_run is optionally overridden for this run.
+      - name: Deploy (kustomize)
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'overlay-default' }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REPO}:${IMAGE_TAG}"
+          echo "Deploying $ENVIRONMENT overlay with image $IMAGE (dry_run: $DRY_RUN)"
+
+          render() {
+            kubectl kustomize "$OVERLAY" \
+              | sed -E "s#image: cr\.yandex/crph9fp6537285vojlnc/lite-scaller:.*#image: ${IMAGE}#"
+          }
+
+          if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "false" ]; then
+            render | sed -E "s/^([[:space:]]*)dry_run:[[:space:]]*(true|false).*/\1dry_run: ${DRY_RUN}/" | kubectl apply -f -
+          else
+            render | kubectl apply -f -
+          fi
+
+          kubectl -n kube-system rollout status deploy/lite-scaler --timeout=120s

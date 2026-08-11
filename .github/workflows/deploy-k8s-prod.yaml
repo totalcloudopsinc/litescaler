@@ -1,0 +1,88 @@
+name: Deploy lite-scaler to k8s prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Scaler dry_run for this deploy (overlay-default keeps the overlay's value = false in prod)"
+        type: choice
+        options:
+          - overlay-default
+          - "true"
+          - "false"
+        default: overlay-default
+  pull_request:
+    types:
+      - closed
+    branches:
+      - master
+  push:
+    branches:
+      - "**"
+
+env:
+  REGISTRY: cr.yandex
+  REPO: cr.yandex/crph9fp6537285vojlnc/lite-scaller
+  IMAGE_TAG: prod-${{ github.sha }}
+  ENVIRONMENT: prod
+  OVERLAY: deploy/kustomize/overlays/prod
+
+jobs:
+  deploy_prod:
+    # prod deploy triggers, mirroring BotsService:
+    #   - manual workflow_dispatch, OR
+    #   - a PR merged into `master`, OR
+    #   - any push whose commit message contains `deploy to prod` (not a Merge).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'closed' &&
+       github.event.pull_request.merged == true &&
+       github.event.pull_request.base.ref == 'master') ||
+      (github.event_name == 'push' &&
+       contains(github.event.head_commit.message, 'deploy to prod') &&
+       !startsWith(github.event.head_commit.message, 'Merge'))
+
+    runs-on: [bot]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          name: lite-scaler-builder
+          cleanup: false
+
+      - name: Build and Push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          push: true
+          tags: |
+            ${{ env.REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.REPO }}:buildcache,mode=max,compression=zstd,image-manifest=true,oci-mediatypes=true
+
+      - name: Deploy (kustomize)
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'overlay-default' }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REPO}:${IMAGE_TAG}"
+          echo "Deploying $ENVIRONMENT overlay with image $IMAGE (dry_run: $DRY_RUN)"
+
+          render() {
+            kubectl kustomize "$OVERLAY" \
+              | sed -E "s#image: cr\.yandex/crph9fp6537285vojlnc/lite-scaller:.*#image: ${IMAGE}#"
+          }
+
+          if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "false" ]; then
+            render | sed -E "s/^([[:space:]]*)dry_run:[[:space:]]*(true|false).*/\1dry_run: ${DRY_RUN}/" | kubectl apply -f -
+          else
+            render | kubectl apply -f -
+          fi
+
+          kubectl -n kube-system rollout status deploy/lite-scaler --timeout=120s
