@@ -22,10 +22,12 @@ on:
 
 env:
   REGISTRY: cr.yandex
-  REPO: cr.yandex/crph9fp6537285vojlnc/lite-scaller
+  REPO: cr.yandex/crpcvsde88m85as3hdu0/lite-scaler
   IMAGE_TAG: prod-${{ github.sha }}
   ENVIRONMENT: prod
   OVERLAY: deploy/kustomize/overlays/prod
+  # Must match `namespace:` in the overlay's kustomization.yaml.
+  NAMESPACE: kube-system
 
 jobs:
   deploy_prod:
@@ -74,15 +76,35 @@ jobs:
           IMAGE="${REPO}:${IMAGE_TAG}"
           echo "Deploying $ENVIRONMENT overlay with image $IMAGE (dry_run: $DRY_RUN)"
 
+          # Pin the freshly-built image into the rendered manifest. The pattern is
+          # derived from $REPO (with dots escaped) rather than hardcoded, so
+          # changing the registry cannot silently stop matching and ship whatever
+          # tag the overlay happens to carry.
+          REPO_RE="${REPO//./\\.}"
+
           render() {
             kubectl kustomize "$OVERLAY" \
-              | sed -E "s#image: cr\.yandex/crph9fp6537285vojlnc/lite-scaller:.*#image: ${IMAGE}#"
+              | sed -E "s#^([[:space:]]*)image:[[:space:]]*${REPO_RE}:.*#\1image: ${IMAGE}#"
           }
 
           if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "false" ]; then
-            render | sed -E "s/^([[:space:]]*)dry_run:[[:space:]]*(true|false).*/\1dry_run: ${DRY_RUN}/" | kubectl apply -f -
+            render | sed -E "s/^([[:space:]]*)dry_run:[[:space:]]*(true|false).*/\1dry_run: ${DRY_RUN}/" > manifest.yaml
           else
-            render | kubectl apply -f -
+            render > manifest.yaml
           fi
 
-          kubectl -n kube-system rollout status deploy/lite-scaler --timeout=120s
+          # Deploying the wrong version silently is worse than failing here.
+          grep -qF "image: ${IMAGE}" manifest.yaml || {
+            echo "ERROR: rendered manifest does not reference ${IMAGE}" >&2
+            grep -n 'image:' manifest.yaml >&2
+            exit 1
+          }
+
+          kubectl apply -f manifest.yaml
+
+          # The ConfigMap is a plain resource, not a configMapGenerator, so it has
+          # no content hash in its name and changing config.yaml alone leaves the
+          # pod spec untouched — no rollout, and `rollout status` would report
+          # success while the pod keeps running the old config. Force a new pod.
+          kubectl -n "$NAMESPACE" rollout restart deploy/lite-scaler
+          kubectl -n "$NAMESPACE" rollout status deploy/lite-scaler --timeout=120s

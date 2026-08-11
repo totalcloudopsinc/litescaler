@@ -171,7 +171,7 @@ split by who needs the Yandex Cloud API and what is safe to keep in Git:
 - **Terraform** (`deploy/terraform/`) provisions the cloud bits — a dedicated
   service account, its two IAM grants (`k8s.editor` +
   `k8s.cluster-api.cluster-admin`, see [Cluster connection](#cluster-connection)),
-  the SA key, and the Kubernetes `Secret` (`lite-scaller-sa`) that carries it.
+  the SA key, and the Kubernetes `Secret` (`lite-scaler-sa`) that carries it.
   The cluster and node group are **pre-existing** — Terraform only references them.
 - **Kustomize** (`deploy/kustomize/`) owns the manifests — a `base/` (Deployment +
   default `config.yaml`) plus one overlay per environment

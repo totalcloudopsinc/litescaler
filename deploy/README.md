@@ -50,11 +50,33 @@ deploy/
 3. `kustomize/overlays/<env>/kustomization.yaml` — `namespace` (must match the
    tfvars namespace) and the image `newTag`.
 4. `kustomize/overlays/<env>/deployment-patch.yaml` — the `nodeSelector` pinning
-   the scaler to a node. Use a label on a **stable** node the scaler never
-   resizes; do **not** target the managed node group, or a scale-down could
-   drain the scaler's own node. Until replaced, the pod stays `Pending`.
+   the scaler to a node, **plus a matching toleration if that node is tainted**.
+   Use a label on a **stable** node the scaler never resizes; do **not** target
+   the managed node group, or a scale-down could drain the scaler's own node.
+   A `nodeSelector` onto a tainted node without the toleration leaves the pod
+   `Pending` forever.
 
-Search for `REPLACE_` placeholders before applying.
+Both overlays are filled in for the MyMeet cluster; only `base/` still carries
+`REPLACE_PER_OVERLAY`, and that is fine — `base/` is never applied on its own,
+each overlay replaces `config.yaml` wholesale.
+
+## Current state per environment
+
+| | dev | prod |
+|:--|:--|:--|
+| Node group | `worker-dev` `cat6ukhj05u7rvd2qqi3` | `worker-prod` `cat8gsfad91brpidohkl` |
+| Watches | ns `bot-dev`, `app=bot-dev-worker` | ns `bot-prod`, `app=bot-prod-worker` |
+| Scaler runs on | `workload=infra` (tolerates `dedicated=infra`) | same |
+| `dry_run` | `true` — first rollout observes only | `true` — **blocked**, see below |
+| Ready to scale for real | after the dry-run logs check out | no |
+
+**prod is not ready.** `worker-prod` is still an `auto_scale` group owned by the
+Yandex cluster-autoscaler. This scaler only understands `fixed_scale`
+(`app/yc.py` reads `scale_policy.fixed_scale.size`), so on an `auto_scale` group
+it reads size `0`, its stability gate blocks every decision, and it runs as a
+silent no-op. Converting `worker-prod` recreates the group — a production
+outage — so it is a separate, planned change. `dev` was converted this way
+already (`k8s-terraform`, `yandex_kubernetes_node_group.external_scaled`).
 
 ## Install
 
@@ -81,7 +103,7 @@ export YC_TOKEN="$(yc iam create-token)"          # or set TF_VAR_yc_service_acc
 ## Why the split
 
 - The SA key is a secret; Kustomize stores manifests in Git, so Terraform creates
-  the Secret instead and Kustomize only references it by name (`lite-scaller-sa`).
+  the Secret instead and Kustomize only references it by name (`lite-scaler-sa`).
 - The two IAM grants (`k8s.editor` + `k8s.cluster-api.cluster-admin`) need the YC
   API, so they live in Terraform — see the main README for why both are required.
 - Everything per-env and non-secret (the `config.yaml` values, image tag) lives in

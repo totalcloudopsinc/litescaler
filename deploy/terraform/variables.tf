@@ -21,7 +21,7 @@ variable "namespace" {
 
 variable "secret_name" {
   type        = string
-  default     = "lite-scaller-sa"
+  default     = "lite-scaler-sa"
   description = "Name of the Kubernetes Secret holding sa-key.json. Must match secretName in the Deployment."
 }
 

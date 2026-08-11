@@ -1,29 +1,40 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: lite-scaller-config
+  name: lite-scaler-config
 data:
   config.yaml: |
     yandex_cloud:
       service_account_key_file: /secrets/sa-key.json
-      node_group_id: REPLACE_WITH_DEV_NODE_GROUP_ID
-      cluster_id: REPLACE_WITH_DEV_CLUSTER_ID
+      # worker-dev, recreated as a fixed_scale group owned by this scaler
+      # (k8s-terraform: yandex_kubernetes_node_group.external_scaled["worker-dev"]).
+      node_group_id: cat6ukhj05u7rvd2qqi3
+      # One cluster serves both dev and prod; they are separated by namespace.
+      cluster_id: catp68de0kgi9fc22v0c
       master_endpoint: internal
 
     kubernetes:
-      namespace: default
+      namespace: bot-dev
       label_selectors:
-        - tag=demo
+        # Pods of the KEDA ScaledJob `bot-dev-general` — one Job per meeting.
+        - app=bot-dev-worker
 
     scaling:
       pending_pod_threshold: 0
       headroom: 0.10
-      max_size: 5
-      min_size: 0
+      max_size: 6                       # the ceiling worker-dev had as auto_scale
+      # min_size 3, NOT 0: scale-down counts a node "empty" when it carries no pod
+      # matching the selectors above, but worker-dev nodes also host bot-dev-main,
+      # calendar-dev-app and scheduler-dev-app. Yandex picks which node to drain,
+      # so a lower floor could evict those. Keep the floor at the steady-state
+      # node count until scale-down has been observed behaving.
+      min_size: 3
       scale_down_cooldown_polls: 3
       poll_interval_seconds: 30
+      # First rollout observes only: decisions are logged, no resize is issued.
+      # Flip to false (or deploy with dry_run=false) once the logs look right.
       dry_run: true
       log_level: DEBUG
-      node_capacity_fallback:
-        cpu: 2
-        memory_gib: 8
+      node_capacity_fallback:           # matches worker-dev: standard-v3 8 vCPU / 16 GiB
+        cpu: 8
+        memory_gib: 16

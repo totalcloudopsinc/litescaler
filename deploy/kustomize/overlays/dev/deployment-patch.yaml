@@ -5,5 +5,23 @@ metadata:
 spec:
   template:
     spec:
+      # Pin to a node the scaler never resizes. Landing on worker-dev — the group
+      # it manages — would let its own scale-down drain the node it runs on.
       nodeSelector:
-        REPLACE_WITH_NODE_LABEL_KEY: REPLACE_WITH_NODE_LABEL_VALUE
+        workload: infra
+      # infra nodes carry `dedicated=infra:NoSchedule`, so the nodeSelector alone
+      # leaves the pod Pending forever. The toleration is what makes it schedule.
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: infra
+          effect: NoSchedule
+      containers:
+        - name: lite-scaler
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

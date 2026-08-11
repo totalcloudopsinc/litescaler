@@ -105,3 +105,12 @@ fi
 terraform -chdir="${TF_DIR}" apply -input=false -var-file="envs/${ENV}.tfvars"
 configure_kubectl
 render | kubectl apply -f -
+
+# The ConfigMap is a plain resource, not a configMapGenerator, so its name carries
+# no content hash: changing config.yaml (a dry_run override, say) leaves the pod
+# spec identical and triggers no rollout, so the pod would keep running the old
+# config indefinitely. Unlike CI, this path usually does not change the image tag
+# either, so without an explicit restart nothing would pick the change up at all.
+NAMESPACE="$(sed -nE 's/^namespace:[[:space:]]*([^[:space:]]+).*/\1/p' "${OVERLAY}/kustomization.yaml")"
+kubectl -n "${NAMESPACE:-kube-system}" rollout restart deploy/lite-scaler
+kubectl -n "${NAMESPACE:-kube-system}" rollout status deploy/lite-scaler --timeout=120s

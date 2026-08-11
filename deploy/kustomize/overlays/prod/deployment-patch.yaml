@@ -9,6 +9,13 @@ spec:
       # group it scales), or a scale-down could drain the scaler's own node.
       nodeSelector:
         workload: infra
+      # infra nodes carry `dedicated=infra:NoSchedule`, so the nodeSelector alone
+      # leaves the pod Pending forever. The toleration is what makes it schedule.
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: infra
+          effect: NoSchedule
       containers:
         - name: lite-scaler
           resources:

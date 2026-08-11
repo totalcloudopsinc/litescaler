@@ -10,9 +10,9 @@ patches:
   - path: config-patch.yaml
     target:
       kind: ConfigMap
-      name: lite-scaller-config
+      name: lite-scaler-config
   - path: deployment-patch.yaml
 
 images:
-  - name: cr.yandex/crph9fp6537285vojlnc/lite-scaller
+  - name: cr.yandex/crpcvsde88m85as3hdu0/lite-scaler
     newTag: latest   # prod: pin to an immutable tag (e.g. a git SHA) before real use

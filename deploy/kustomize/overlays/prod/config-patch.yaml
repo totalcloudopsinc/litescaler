@@ -1,29 +1,43 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: lite-scaller-config
+  name: lite-scaler-config
 data:
   config.yaml: |
+    # NOT READY TO RUN FOR REAL. worker-prod is still an auto_scale group, owned
+    # by the Yandex cluster-autoscaler. This scaler only understands fixed_scale
+    # (app/yc.py reads scale_policy.fixed_scale.size), so against an auto_scale
+    # group it reads the size as 0 and its stability gate blocks every decision —
+    # it would run as a silent no-op. Converting worker-prod means recreating it,
+    # which is a production outage, so that is a separate, planned change.
+    # Until then dry_run stays true.
     yandex_cloud:
       service_account_key_file: /secrets/sa-key.json
-      node_group_id: REPLACE_WITH_PROD_NODE_GROUP_ID
-      cluster_id: REPLACE_WITH_PROD_CLUSTER_ID
+      node_group_id: cat8gsfad91brpidohkl
+      cluster_id: catp68de0kgi9fc22v0c
       master_endpoint: internal
 
     kubernetes:
       namespace: bot-prod
       label_selectors:
-        - REPLACE_WITH_PROD_POD_LABEL   # e.g. app=bot-prod-worker
+        # Pods of the KEDA ScaledJob `bot-prod-general` (min 1 / max 500).
+        - app=bot-prod-worker
 
     scaling:
       pending_pod_threshold: 0
       headroom: 0.10
       max_size: 45                      # worker-prod ceiling
+      # Capacity accounting caveat: the scaler only measures nodes labelled
+      # yandex.cloud/node-group-id=<node_group_id>, but bot-prod pods select on
+      # workload=general-prod, which ALSO matches worker-prod-reserve (a separate
+      # group, 3 warm nodes). Free capacity on the reserve pool is therefore
+      # invisible here and the scaler can add nodes the reserve would have
+      # absorbed. Validate against real load before trusting scale-up sizing.
       min_size: 1
       scale_down_cooldown_polls: 3
       poll_interval_seconds: 30
-      dry_run: false                    # prod scales for real; override per-deploy with install.sh --dry-run
+      dry_run: true                     # see the blocker at the top of this file
       log_level: INFO
-      node_capacity_fallback:           # match the prod node size (highfreq-v3 32 vCPU / 64 GiB)
+      node_capacity_fallback:           # matches worker-prod: highfreq-v3 32 vCPU / 64 GiB
         cpu: 32
         memory_gib: 64

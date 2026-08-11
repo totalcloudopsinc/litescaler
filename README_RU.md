@@ -245,7 +245,7 @@ CA-сертификат, и выпускает IAM-токен (автомати�
 - **Terraform** (`deploy/terraform/`) создаёт облачную часть — отдельный сервисный
   аккаунт, его две IAM-роли (`k8s.editor` + `k8s.cluster-api.cluster-admin`,
   см. [Предварительные требования](#1-сервисный-аккаунт-и-iam-роли)), ключ SA и
-  Kubernetes-`Secret` (`lite-scaller-sa`), который этот ключ несёт. Кластер и
+  Kubernetes-`Secret` (`lite-scaler-sa`), который этот ключ несёт. Кластер и
   группа узлов **уже существуют** — Terraform только ссылается на них.
 - **Kustomize** (`deploy/kustomize/`) владеет манифестами — `base/` (Deployment +
   `config.yaml` по умолчанию) и по одному оверлею на окружение
