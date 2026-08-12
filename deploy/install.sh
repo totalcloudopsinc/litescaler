@@ -112,5 +112,17 @@ render | kubectl apply -f -
 # config indefinitely. Unlike CI, this path usually does not change the image tag
 # either, so without an explicit restart nothing would pick the change up at all.
 NAMESPACE="$(sed -nE 's/^namespace:[[:space:]]*([^[:space:]]+).*/\1/p' "${OVERLAY}/kustomization.yaml")"
-kubectl -n "${NAMESPACE:-kube-system}" rollout restart deploy/lite-scaler
-kubectl -n "${NAMESPACE:-kube-system}" rollout status deploy/lite-scaler --timeout=120s
+NAMESPACE="${NAMESPACE:-kube-system}"
+kubectl -n "${NAMESPACE}" rollout restart deploy/lite-scaler
+
+# Not fatal: this script is also the FIRST thing run on a new environment, before
+# CI has ever pushed an image. The overlay points at :latest, so until then the
+# pod cannot pull and will never become ready — while the Terraform and manifest
+# work above did succeed. Report it and let the operator judge.
+if ! kubectl -n "${NAMESPACE}" rollout status deploy/lite-scaler --timeout=120s; then
+  echo >&2
+  echo "WARN: lite-scaler did not become ready within 120s." >&2
+  echo "      On a first install this is expected: the registry is empty until a" >&2
+  echo "      CI run builds and pushes an image. Everything else was applied." >&2
+  kubectl -n "${NAMESPACE}" get pods -l app=lite-scaler >&2 || true
+fi
