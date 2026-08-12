@@ -96,6 +96,34 @@ Both overlays are filled in for the MyMeet cluster; only `base/` still carries
 `REPLACE_PER_OVERLAY`, and that is fine — `base/` is never applied on its own,
 each overlay replaces `config.yaml` wholesale.
 
+## Known limitations (observed on the MyMeet cluster, 2026-08-12)
+
+**Memory scales with the whole cluster, not with the node group.** Free-capacity
+accounting calls `list_pod_for_all_namespaces()` and deserialises every pod in the
+cluster — 702 of them here — although it only needs the pods sitting on the nodes
+of the managed group. At 128Mi the pod was OOM-killed (exit 137) on the first
+poll, every time. Measured steady state: **208Mi / 81m cpu**, hence 256Mi request
+/ 512Mi limit. Narrowing that call with a `spec.nodeName` field selector would
+make the footprint independent of cluster size; until then, the limit has to be
+revisited whenever the cluster grows, and prod bursting to 45 worker nodes will
+push it further.
+
+**"Empty" means "no pod matching the selector", not "no pods".** Scale-down counts
+a node as empty when nothing on it matches `label_selectors` — other workloads on
+that node are invisible to it, and Yandex, not the scaler, picks which node to
+drain. Observed live on dev: the scaler classified `worker-dev-3` as empty while
+it was running `bot-dev-main`, `calendar-dev-app` and `scheduler-dev-app` — the
+busiest of the three nodes by requests. Only `min_size` held it back:
+
+```
+Group ... has 3 Ready node(s), 2 busy with pods matching ['app=bot-dev-worker'], 1 empty
+  empty nodes: ['worker-dev-3']
+Decision: no empty nodes to remove (empty=1, size=3, min_size=3); no action
+```
+
+Keep `min_size` at the count of nodes carrying workloads you cannot afford to
+lose, unless the group is genuinely dedicated to the selected pods.
+
 ## Current state per environment
 
 | | dev | prod |

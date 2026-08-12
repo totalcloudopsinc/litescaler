@@ -21,7 +21,12 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 256Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              # 128Mi OOM-killed the pod (exit 137) on every poll: free-capacity
+              # accounting calls list_pod_for_all_namespaces(), which deserialises
+              # EVERY pod in the cluster — 702 here — not just those on the 3 nodes
+              # it measures. Measured steady state at that size: 208Mi / 81m cpu.
+              # Note the footprint tracks TOTAL cluster size, not this node group.
+              memory: 512Mi

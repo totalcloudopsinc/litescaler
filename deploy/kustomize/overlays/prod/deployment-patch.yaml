@@ -21,7 +21,11 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 256Mi
             limits:
               cpu: 200m
-              memory: 128Mi
+              # See the dev overlay: free-capacity accounting lists every pod in
+              # the cluster, so the footprint scales with total cluster size, not
+              # with this environment. 128Mi OOM-killed it on dev at 702 pods, and
+              # prod bursts to 45 worker nodes on top of that.
+              memory: 512Mi
