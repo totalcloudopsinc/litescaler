@@ -8,11 +8,18 @@ the manifests: a `base/` plus one overlay per environment that sets the per-env
 
 The cluster and node group are **pre-existing** — Terraform references them.
 
-## Deploy via GitHub Actions (primary)
+## Deploy via GitHub Actions (intended, NOT yet usable)
 
-Day-to-day deploys go through CI, like BotsService. Two workflows build+push the
-image and apply the matching Kustomize overlay on the self-hosted `[bot]` runner
-(which is expected to already have `kubectl` pointed at the cluster):
+> **There is no runner for this repo yet.** The workflows below are written and
+> committed, but nothing picks up their jobs — `runs-on: [bot]` is BotsService's
+> self-hosted runner label. Until a runner is attached, build and deploy by hand:
+> see [Manual build and push](#manual-build-and-push) below, then `./install.sh <env>`.
+> A push to a branch will not start anything by accident: the dev job additionally
+> requires the `dev` branch or `deploy to dev` in the commit message.
+
+Day-to-day deploys are meant to go through CI, like BotsService. Two workflows
+build+push the image and apply the matching Kustomize overlay on the self-hosted
+`[bot]` runner (which is expected to already have `kubectl` pointed at the cluster):
 
 | Workflow | Env / namespace | Triggers |
 |:---------|:----------------|:---------|
@@ -30,6 +37,35 @@ Auto-triggered (push/PR) deploys always use the overlay default.
 
 Terraform below is a **one-time bootstrap** per environment (service account +
 IAM + SA-key Secret); CI does not run it.
+
+## Manual build and push
+
+While there is no runner, the image is built and pushed from a workstation:
+
+```bash
+./build.sh            # builds linux/amd64, pushes :latest and :<short-sha>
+```
+
+The platform is pinned because the cluster nodes are amd64 while this is usually
+built on an arm64 Mac — a native build pushes fine and then crash-loops in the
+cluster with `exec format error`.
+
+**Credential gotcha.** `docker-credential-yc` resolves `cr.yandex` against the
+profile pinned in `~/.config/yandex-cloud/credhelper-config.yaml`, *not* the
+active `yc` profile, and that mapping is one profile per registry **host** — so
+several clouds sharing `cr.yandex` cannot all work through the helper. If the
+bound profile is not the one that owns this registry, the push fails with an
+opaque `denied: Permission denied` after the whole build has completed.
+`build.sh` warns when it detects the mismatch. To push anyway, authenticate
+explicitly — the helper takes precedence, so its entry has to leave
+`credHelpers` in `~/.docker/config.json` first, and go back afterwards:
+
+```bash
+# remove the "cr.yandex" line from credHelpers in ~/.docker/config.json, then:
+docker login cr.yandex -u iam -p "$(yc iam create-token)"
+docker push cr.yandex/<registry-id>/lite-scaler:latest
+# restore the credHelpers entry
+```
 
 ```
 deploy/

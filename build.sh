@@ -42,6 +42,27 @@ grep -q "cr.yandex" ~/.docker/config.json 2>/dev/null || {
   exit 1
 }
 
+# ...but having the entry is not enough. `docker-credential-yc` resolves cr.yandex
+# against the profile pinned in credhelper-config.yaml, NOT the active yc profile.
+# On a laptop with several clouds those differ, and the push then dies with an
+# opaque "denied: Permission denied" long after the build has finished. The
+# mapping is one profile per registry HOST, so two clouds both on cr.yandex cannot
+# be served by the helper at the same time.
+CREDHELPER_CFG="${HOME}/.config/yandex-cloud/credhelper-config.yaml"
+if [[ -f "${CREDHELPER_CFG}" ]]; then
+  BOUND="$(sed -nE 's/^cr\.yandex:[[:space:]]*(.+)$/\1/p' "${CREDHELPER_CFG}" | tr -d '[:space:]')"
+  ACTIVE="$(yc config profile list 2>/dev/null | sed -nE 's/^([^[:space:]]+)[[:space:]]+ACTIVE.*$/\1/p')"
+  if [[ -n "${BOUND}" && -n "${ACTIVE}" && "${BOUND}" != "${ACTIVE}" ]]; then
+    echo "WARN: the docker credential helper resolves cr.yandex via yc profile" >&2
+    echo "      '${BOUND}', but the active profile is '${ACTIVE}'." >&2
+    echo "      If the push below fails with 'denied: Permission denied', log in" >&2
+    echo "      explicitly instead — note that the helper takes precedence, so the" >&2
+    echo "      cr.yandex entry has to leave credHelpers in ~/.docker/config.json" >&2
+    echo "      first (put it back afterwards):" >&2
+    echo "        docker login cr.yandex -u iam -p \"\$(yc iam create-token)\"" >&2
+  fi
+fi
+
 echo "Building for ${PLATFORM}"
 printf '  tag: %s\n' "${NAMES[@]}"
 
