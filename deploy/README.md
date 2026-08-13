@@ -31,7 +31,7 @@ manifest at deploy time.
 
 **dry_run per deploy.** Each workflow has a `workflow_dispatch` input `dry_run`
 with `overlay-default | true | false`. `overlay-default` keeps the overlay's
-baked value (dev = `true`, prod = `false`); `true`/`false` override it for that
+baked value (dev = `false`, prod = `true`); `true`/`false` override it for that
 run (the scaler logs decisions but performs no resize when `dry_run: true`).
 Auto-triggered (push/PR) deploys always use the overlay default.
 
