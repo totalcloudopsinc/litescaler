@@ -128,21 +128,31 @@ Two pods never scheduled, which exposed the capacity-accounting flaw below.
 
 `decide` subtracts the group's **total** free CPU from pending demand. Scheduling
 is bin-packing, so a remainder too small for one pod is unusable — yet still
-counted. At the peak of the test every node had a remainder below one pod:
+counted. `group_free_capacity()` sums the per-node remainders into one number, so
+the distribution never reaches `decide` at all.
+
+Straight from the scaler's log at the moment it sized the resize:
 
 ```
-worker-dev-1  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
-worker-dev-2  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
-worker-dev-3  allocatable 7910m  requested 7070m  free  840m  -> fits 0 pods
-worker-dev-4  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
-worker-dev-5  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
+node worker-dev-1: allocatable 7910m, requested 6470m, free 1440m
+node worker-dev-2: allocatable 7910m, requested 6470m, free 1440m
+node worker-dev-3: allocatable 7910m, requested 7070m, free  840m
+Free capacity across 3 Ready node(s): 3720m cpu / 16.17Gi memory
+decide: pending=8, requests 16000m cpu, free in group 3720m cpu, node size 7910m
+decide: unmet demand after free capacity: 12280m cpu -> 1.55 nodes by cpu;
+        max * (1 + 0.10 headroom) = 1.71 -> ceil = 2 nodes needed
+decide: 3 + 2 = 5 wanted, capped by max_size 6 -> target 5 (+2)
 ```
 
-6600m "free" in aggregate, 0 usable for a 2000m pod. The scaler had deducted that
-6600m from demand, so it under-provisioned and two pods stayed `Pending`
-indefinitely — they were already in `_handled_pods`, so no later poll retried
-them. Counting only per-node remainders that are at least one pod's request would
-fix it.
+The largest hole was 1440m against a 2000m request, so **none** of that 3720m
+could take a pod — and all of it was deducted anyway. Without the deduction:
+`16000 / 7910 = 2.02`, `* 1.10 = 2.23`, `ceil = 3` nodes. It added 2, and two of
+the eight pods never scheduled. They were already in `_handled_pods` by then, so
+no later poll retried them.
+
+Counting only per-node remainders that are at least one pod's request would fix
+it. `tests/test_scaling_fragmentation.py` reproduces the decision without a
+cluster and will start failing when that changes.
 
 ### dry_run is not side-effect free
 
