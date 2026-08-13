@@ -31,9 +31,12 @@ data:
       min_size: 3
       scale_down_cooldown_polls: 3
       poll_interval_seconds: 30
-      # First rollout observes only: decisions are logged, no resize is issued.
-      # Flip to false (or deploy with dry_run=false) once the logs look right.
-      dry_run: true
+      # Live on dev. Note that dry_run is NOT side-effect free: service.py records
+      # pods in _handled_pods whether or not the resize was skipped, so a dry run
+      # consumes the pods it "would" have scaled for. Switching dry_run therefore
+      # needs a pod restart to clear that in-memory set, or the next real decision
+      # sees no new pods and does nothing.
+      dry_run: false
       log_level: DEBUG
       node_capacity_fallback:           # matches worker-dev: standard-v3 8 vCPU / 16 GiB
         cpu: 8

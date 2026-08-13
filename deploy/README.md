@@ -96,6 +96,61 @@ Both overlays are filled in for the MyMeet cluster; only `base/` still carries
 `REPLACE_PER_OVERLAY`, and that is fine — `base/` is never applied on its own,
 each overlay replaces `config.yaml` wholesale.
 
+## Live scale test on dev (2026-08-13)
+
+Forced load by patching the constant in the `bot-dev-general` ScaledJob's
+Prometheus query (`+ 1` → `+ 15`), which makes KEDA target 15 jobs against an
+empty queue. **Always save the original query first and restore it after** — left
+in place, dev holds N pods and burns nodes indefinitely.
+
+| T+ | Event |
+|:--|:--|
+| 0s | query patched to `+ 15` |
+| 17s | 8 pods `Pending`, 8 `Running` |
+| 56s | scaler decided `3 -> 5` and issued the resize |
+| 3m46s | 5 nodes `Ready` |
+| 7m03s | `squat.ai/video` registered on the new nodes |
+| — | query restored to `+ 1` |
+| +2m06s | scaler decided `5 -> 3`, floored by `min_size` |
+| +3m20s | group back to 3 nodes, dev services untouched (0 restarts) |
+
+Sizing arithmetic matched the prediction exactly:
+
+```
+unmet demand after free capacity: 12280m cpu -> 1.55 nodes by cpu
+  max * (1 + 0.10 headroom) = 1.71 -> ceil = 2 nodes needed
+3 + 2 = 5 wanted, capped by max_size 6 -> target 5 (+2)
+```
+
+Two pods never scheduled, which exposed the capacity-accounting flaw below.
+
+### Free capacity is summed across nodes, but scheduling is per-node
+
+`decide` subtracts the group's **total** free CPU from pending demand. Scheduling
+is bin-packing, so a remainder too small for one pod is unusable — yet still
+counted. At the peak of the test every node had a remainder below one pod:
+
+```
+worker-dev-1  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
+worker-dev-2  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
+worker-dev-3  allocatable 7910m  requested 7070m  free  840m  -> fits 0 pods
+worker-dev-4  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
+worker-dev-5  allocatable 7910m  requested 6470m  free 1440m  -> fits 0 pods
+```
+
+6600m "free" in aggregate, 0 usable for a 2000m pod. The scaler had deducted that
+6600m from demand, so it under-provisioned and two pods stayed `Pending`
+indefinitely — they were already in `_handled_pods`, so no later poll retried
+them. Counting only per-node remainders that are at least one pod's request would
+fix it.
+
+### dry_run is not side-effect free
+
+`service.py` records pods in `_handled_pods` whether or not the resize was
+actually issued. A dry run therefore consumes the pods it "would" have scaled
+for, and flipping `dry_run` to `false` afterwards finds nothing new to act on.
+Restart the pod when changing the flag — that set is in-memory only.
+
 ## Known limitations (observed on the MyMeet cluster, 2026-08-12)
 
 **Memory scales with the whole cluster, not with the node group.** Free-capacity
@@ -131,7 +186,7 @@ lose, unless the group is genuinely dedicated to the selected pods.
 | Node group | `worker-dev` `cat6ukhj05u7rvd2qqi3` | `worker-prod` `cat8gsfad91brpidohkl` |
 | Watches | ns `bot-dev`, `app=bot-dev-worker` | ns `bot-prod`, `app=bot-prod-worker` |
 | Scaler runs on | `workload=infra` (tolerates `dedicated=infra`) | same |
-| `dry_run` | `true` — first rollout observes only | `true` — **blocked**, see below |
+| `dry_run` | `false` — live since the 2026-08-13 scale test | `true` — **blocked**, see below |
 | Ready to scale for real | after the dry-run logs check out | no |
 
 **prod is not ready.** `worker-prod` is still an `auto_scale` group owned by the
