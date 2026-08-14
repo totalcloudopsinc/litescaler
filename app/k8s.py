@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import logging
 import tempfile
+from dataclasses import dataclass
 from typing import Protocol
 
 from kubernetes import client
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class NodeFree:
+
+    name: str
+    cpu_millicores: int
+    mem_bytes: int
 
 _MEM_MULTIPLIERS = {
     "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5,
@@ -145,15 +154,6 @@ class KubeClient:
             )
         return unscheduled
 
-    def matching_pod_uids(self, namespace: str, selectors: list[str]) -> set[str]:
-        pods = self._v1.list_namespaced_pod(namespace=namespace).items
-        uids = {p.metadata.uid for p in pods if pod_matches_selectors(p, selectors)}
-        logger.debug(
-            "Pods matching %s in ns=%s: %d of %d pods currently exist",
-            selectors, namespace, len(uids), len(pods),
-        )
-        return uids
-
     def ready_group_node_count(self, node_group_id: str) -> int:
         nodes = self._v1.list_node().items
         group = nodes_in_group(nodes, node_group_id)
@@ -167,7 +167,7 @@ class KubeClient:
         )
         return len(group)
 
-    def group_free_capacity(self, node_group_id: str) -> tuple[int, int]:
+    def group_free_capacity(self, node_group_id: str) -> list[NodeFree]:
         nodes = self._v1.list_node().items
         group = nodes_in_group(nodes, node_group_id)
         if not group:
@@ -176,7 +176,7 @@ class KubeClient:
                 "nodes; assuming zero free capacity",
                 NODE_GROUP_LABEL, node_group_id, len(nodes),
             )
-            return (0, 0)
+            return []
 
         used_cpu: dict[str, int] = {}
         used_mem: dict[str, int] = {}
@@ -190,8 +190,7 @@ class KubeClient:
             used_cpu[node_name] = used_cpu.get(node_name, 0) + cpu
             used_mem[node_name] = used_mem.get(node_name, 0) + mem
 
-        free_cpu = 0
-        free_mem = 0
+        free: list[NodeFree] = []
         for node in group:
             alloc = node.status.allocatable or {}
             name = node.metadata.name
@@ -206,13 +205,17 @@ class KubeClient:
                 format_cpu(used_cpu.get(name, 0)), format_mem(used_mem.get(name, 0)),
                 format_cpu(node_free_cpu), format_mem(node_free_mem),
             )
-            free_cpu += node_free_cpu
-            free_mem += node_free_mem
+            free.append(NodeFree(name, node_free_cpu, node_free_mem))
         logger.info(
-            "Free capacity across %d Ready node(s) of group %s: %s cpu / %s memory",
-            len(group), node_group_id, format_cpu(free_cpu), format_mem(free_mem),
+            "Free capacity across %d Ready node(s) of group %s: %s cpu / %s "
+            "memory in total, largest single node %s cpu / %s memory",
+            len(group), node_group_id,
+            format_cpu(sum(n.cpu_millicores for n in free)),
+            format_mem(sum(n.mem_bytes for n in free)),
+            format_cpu(max(n.cpu_millicores for n in free)),
+            format_mem(max(n.mem_bytes for n in free)),
         )
-        return (free_cpu, free_mem)
+        return free
 
     def get_node_capacity(self, node_group_id: str) -> tuple[int, int] | None:
         nodes = self._v1.list_node().items

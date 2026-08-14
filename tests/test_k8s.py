@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from app.k8s import (
+    NodeFree,
     parse_cpu_to_millicores,
     parse_memory_to_bytes,
     sum_pod_requests,
@@ -227,20 +228,6 @@ def test_ready_group_node_count_counts_only_ready_group_nodes():
     assert client.ready_group_node_count("grp-1") == 1
 
 
-def _uid_pod(uid, labels):
-    return SimpleNamespace(metadata=SimpleNamespace(uid=uid, labels=labels))
-
-
-def test_matching_pod_uids_filters_by_selector_any_phase():
-    pods = [
-        _uid_pod("u1", {"team": "ml"}),
-        _uid_pod("u2", {"team": "other"}),   # no match -> excluded
-        _uid_pod("u3", {"team": "ml", "env": "prod"}),
-    ]
-    client = _kube_with([], pods)
-    assert client.matching_pod_uids("ml", ["team=ml"]) == {"u1", "u3"}
-
-
 def _alloc_group_node(name, cpu_milli, mem_bytes, group="grp-1", ready=True):
     status = "True" if ready else "False"
     return SimpleNamespace(
@@ -282,15 +269,39 @@ def test_group_free_capacity_subtracts_requests_on_ready_group_nodes():
     client = _kube_with(nodes, [])
     client._v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=pods)
 
-    cpu, mem = client.group_free_capacity("grp-1")
-    assert cpu == 4000 - 1000
-    assert mem == 8 * 1024**3 - 1024**3
+    free = client.group_free_capacity("grp-1")
+    assert free == [NodeFree("a", 4000 - 1000, 8 * 1024**3 - 1024**3)]
 
 
-def test_group_free_capacity_zero_without_group_nodes():
+def test_group_free_capacity_reports_each_node_separately():
+    nodes = [
+        _alloc_group_node("a", 4000, 8 * 1024**3, group="grp-1"),
+        _alloc_group_node("b", 4000, 8 * 1024**3, group="grp-1"),
+    ]
+    pods = [_bound_pod("a", "3", "6Gi"), _bound_pod("b", "3", "6Gi")]
+    client = _kube_with(nodes, [])
+    client._v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=pods)
+
+    free = client.group_free_capacity("grp-1")
+    assert free == [
+        NodeFree("a", 1000, 2 * 1024**3),
+        NodeFree("b", 1000, 2 * 1024**3),
+    ]
+
+
+def test_group_free_capacity_never_negative_when_overcommitted():
+    nodes = [_alloc_group_node("a", 4000, 8 * 1024**3, group="grp-1")]
+    pods = [_bound_pod("a", "6", "12Gi")]
+    client = _kube_with(nodes, [])
+    client._v1.list_pod_for_all_namespaces.return_value = SimpleNamespace(items=pods)
+
+    assert client.group_free_capacity("grp-1") == [NodeFree("a", 0, 0)]
+
+
+def test_group_free_capacity_empty_without_group_nodes():
     nodes = [_alloc_group_node("a", 4000, 8 * 1024**3, group="grp-2")]
     client = _kube_with(nodes, [])
-    assert client.group_free_capacity("grp-1") == (0, 0)
+    assert client.group_free_capacity("grp-1") == []
     client._v1.list_pod_for_all_namespaces.assert_not_called()
 
 

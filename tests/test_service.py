@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from app.config import (
     Config, YandexCloudConfig, KubernetesConfig, ScalingConfig,
 )
+from app.k8s import NodeFree
 from app.service import ScalerService
 
 
@@ -24,10 +25,6 @@ def _pods(n, start=0):
     ]
 
 
-def _uids(pods):
-    return {p.metadata.uid for p in pods}
-
-
 def _service(
     config, pending_pods, node_capacity, current_size, empty_nodes=0,
     ready_nodes=None,
@@ -36,11 +33,10 @@ def _service(
     kube.list_pending_pods.return_value = pending_pods
     kube.get_node_capacity.return_value = node_capacity
     kube.empty_group_node_count.return_value = empty_nodes
-    kube.matching_pod_uids.return_value = _uids(pending_pods)
     kube.ready_group_node_count.return_value = (
         current_size if ready_nodes is None else ready_nodes
     )
-    kube.group_free_capacity.return_value = (0, 0)
+    kube.group_free_capacity.return_value = []
     yc = MagicMock()
     yc.get_current_size.return_value = current_size
     yc.operation_in_progress.return_value = False
@@ -52,7 +48,7 @@ def test_evaluate_scales_when_needed(monkeypatch):
     config = _config()
     svc, kube, yc = _service(config, _pods(4), (4000, 16 * 1024**3), 2)
     monkeypatch.setattr(
-        "app.service.sum_pod_requests", lambda p: (8000, 1 * 1024**3)
+        "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1024**3 * len(p))
     )
 
     decision = svc.evaluate()
@@ -94,7 +90,7 @@ def test_evaluate_dry_run_does_not_resize(monkeypatch):
     config = _config(dry_run=True)
     svc, kube, yc = _service(config, _pods(4), (4000, 16 * 1024**3), 2)
     monkeypatch.setattr(
-        "app.service.sum_pod_requests", lambda p: (8000, 1 * 1024**3)
+        "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1024**3 * len(p))
     )
 
     decision = svc.evaluate()
@@ -107,7 +103,7 @@ def test_evaluate_uses_capacity_fallback_when_no_node(monkeypatch):
     config = _config()
     svc, kube, yc = _service(config, _pods(4), None, 2)  # no Ready node
     monkeypatch.setattr(
-        "app.service.sum_pod_requests", lambda p: (8000, 1 * 1024**3)
+        "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1024**3 * len(p))
     )
 
     decision = svc.evaluate()
@@ -118,7 +114,7 @@ def test_evaluate_reads_capacity_of_the_target_node_group(monkeypatch):
     config = _config()
     svc, kube, yc = _service(config, _pods(4), (4000, 16 * 1024**3), 2)
     monkeypatch.setattr(
-        "app.service.sum_pod_requests", lambda p: (8000, 1 * 1024**3)
+        "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1024**3 * len(p))
     )
 
     svc.evaluate()
@@ -128,10 +124,12 @@ def test_evaluate_reads_capacity_of_the_target_node_group(monkeypatch):
     )
 
 
-def test_evaluate_does_not_rescale_same_pending_pods(monkeypatch):
+def test_evaluate_does_not_rescale_while_previous_resize_lands(monkeypatch):
     config = _config()
     pods = _pods(4)
     svc, kube, yc = _service(config, pods, (4000, 16 * 1024**3), 2)
+    yc.get_current_size.side_effect = [2, 5]  # resize requested after poll 1
+    kube.ready_group_node_count.return_value = 2  # new nodes not up yet
     monkeypatch.setattr(
         "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1 * 1024**3)
     )
@@ -142,16 +140,15 @@ def test_evaluate_does_not_rescale_same_pending_pods(monkeypatch):
 
     second = svc.evaluate()
     assert second.should_scale is False
-    assert second.pending_count == 0
     yc.set_size.assert_called_once()  # not called again
 
 
-def test_evaluate_scales_for_new_pods_while_provisioning(monkeypatch):
+def test_evaluate_rescales_pods_the_landed_resize_did_not_place(monkeypatch):
     config = _config()
-    old = _pods(4, start=0)
-    new = _pods(4, start=100)
-    svc, kube, yc = _service(config, old, (4000, 16 * 1024**3), 2)
-    kube.list_pending_pods.side_effect = [old, old + new]
+    pods = _pods(4)
+    svc, kube, yc = _service(config, pods, (4000, 16 * 1024**3), 2)
+    yc.get_current_size.side_effect = [2, 5]
+    kube.ready_group_node_count.side_effect = [2, 5]  # resize landed
     monkeypatch.setattr(
         "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1 * 1024**3)
     )
@@ -164,39 +161,42 @@ def test_evaluate_scales_for_new_pods_while_provisioning(monkeypatch):
     assert yc.set_size.call_count == 2
 
 
-def test_evaluate_forgets_pods_that_no_longer_exist(monkeypatch):
+def test_evaluate_does_not_rescale_when_the_new_nodes_have_room(monkeypatch):
     config = _config()
     pods = _pods(4)
     svc, kube, yc = _service(config, pods, (4000, 16 * 1024**3), 2)
-    kube.list_pending_pods.side_effect = [pods, []]
-    kube.matching_pod_uids.side_effect = [_uids(pods), set()]
+    yc.get_current_size.side_effect = [2, 5]
+    kube.ready_group_node_count.side_effect = [2, 5]
     monkeypatch.setattr(
         "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1 * 1024**3)
     )
 
     svc.evaluate()
-    assert svc._handled_pods
+    kube.group_free_capacity.return_value = [
+        NodeFree(f"n{i}", 4000, 16 * 1024**3) for i in range(3)
+    ]
+    second = svc.evaluate()
 
-    svc.evaluate()
-    assert svc._handled_pods == set()
-
-
-def test_evaluate_does_not_rescale_pods_that_churn_back_to_pending(monkeypatch):
-    config = _config()
-    pods = _pods(4)
-    svc, kube, yc = _service(config, pods, (4000, 16 * 1024**3), 2)
-    kube.list_pending_pods.side_effect = [pods, [], pods]
-    kube.matching_pod_uids.return_value = _uids(pods)
-    monkeypatch.setattr(
-        "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1 * 1024**3)
-    )
-
-    svc.evaluate()
-    svc.evaluate()
-    third = svc.evaluate()
-
-    assert third.should_scale is False
+    assert second.should_scale is False
     assert yc.set_size.call_count == 1
+
+
+def test_evaluate_scales_when_free_capacity_is_fragmented(monkeypatch):
+    config = _config(pending_pod_threshold=0)
+    pods = _pods(2)
+    svc, kube, yc = _service(config, pods, (7910, 32 * 1024**3), 7)
+    kube.group_free_capacity.return_value = [
+        NodeFree(f"worker-dev-{i}", 1440, 5 * 1024**3) for i in range(7)
+    ]
+    monkeypatch.setattr(
+        "app.service.sum_pod_requests", lambda p: (2000 * len(p), 1024**3 * len(p))
+    )
+
+    decision = svc.evaluate()
+
+    assert decision.should_scale is True
+    assert decision.target_size == 8
+    yc.set_size.assert_called_once_with(8)
 
 
 def test_evaluate_skips_scale_up_while_node_group_transitioning(monkeypatch):
@@ -234,7 +234,7 @@ def test_evaluate_no_scale_up_when_ready_node_has_free_capacity(monkeypatch):
         config, pods, (4000, 16 * 1024**3), current_size=1, ready_nodes=1
     )
 
-    kube.group_free_capacity.return_value = (4000, 16 * 1024**3)
+    kube.group_free_capacity.return_value = [NodeFree("n1", 4000, 16 * 1024**3)]
     monkeypatch.setattr(
         "app.service.sum_pod_requests", lambda p: (1000 * len(p), 1 * 1024**3)
     )
@@ -257,18 +257,6 @@ def test_evaluate_skips_scale_while_operation_in_progress(monkeypatch):
 
     assert decision.should_scale is False
     yc.set_size.assert_not_called()
-
-
-def test_evaluate_does_not_remember_pods_when_not_scaling(monkeypatch):
-    config = _config(pending_pod_threshold=3)
-    svc, kube, yc = _service(config, _pods(2), (4000, 16 * 1024**3), 2)
-    monkeypatch.setattr(
-        "app.service.sum_pod_requests", lambda p: (1000 * len(p), 1 * 1024**3)
-    )
-
-    svc.evaluate()
-
-    assert svc._handled_pods == set()
 
 
 def test_scale_by_resizes_to_clamped_target():
