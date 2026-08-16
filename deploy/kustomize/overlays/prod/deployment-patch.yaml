@@ -5,8 +5,8 @@ metadata:
 spec:
   template:
     spec:
-      # Pin to a node the scaler never resizes. Landing on worker-dev — the group
-      # it manages — would let its own scale-down drain the node it runs on.
+      # Pin to a STABLE node that the scaler never resizes (not the managed
+      # group it scales), or a scale-down could drain the scaler's own node.
       nodeSelector:
         workload: infra
       # infra nodes carry `dedicated=infra:NoSchedule`, so the nodeSelector alone
@@ -24,9 +24,8 @@ spec:
               memory: 256Mi
             limits:
               cpu: 200m
-              # 128Mi OOM-killed the pod (exit 137) on every poll: free-capacity
-              # accounting calls list_pod_for_all_namespaces(), which deserialises
-              # EVERY pod in the cluster — 702 here — not just those on the 3 nodes
-              # it measures. Measured steady state at that size: 208Mi / 81m cpu.
-              # Note the footprint tracks TOTAL cluster size, not this node group.
+              # See the dev overlay: free-capacity accounting lists every pod in
+              # the cluster, so the footprint scales with total cluster size, not
+              # with this environment. 128Mi OOM-killed it on dev at 702 pods, and
+              # prod bursts to 45 worker nodes on top of that.
               memory: 512Mi

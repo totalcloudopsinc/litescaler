@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: lite-scaller-config
+  name: lite-scaler-config
 data:
   config.yaml: |
     yandex_cloud:

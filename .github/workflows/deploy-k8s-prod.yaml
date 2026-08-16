@@ -1,0 +1,195 @@
+name: Deploy lite-scaler to k8s prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Scaler dry_run for this deploy (overlay-default keeps the overlay's value = false in prod)"
+        type: choice
+        options:
+          - overlay-default
+          - "true"
+          - "false"
+        default: overlay-default
+  pull_request:
+    types:
+      - closed
+    branches:
+      - master
+  push:
+    branches:
+      - "**"
+
+env:
+  REGISTRY: cr.yandex
+  REPO: cr.yandex/crpcvsde88m85as3hdu0/lite-scaler
+  IMAGE_TAG: prod-${{ github.sha }}
+  ENVIRONMENT: prod
+  OVERLAY: deploy/kustomize/overlays/prod
+  # Must match `namespace:` in the overlay's kustomization.yaml.
+  NAMESPACE: kube-system
+
+jobs:
+  # Same gate as the dev workflow. Kept as its own job rather than a `needs` on
+  # the dev workflow's job, because workflows cannot depend on each other.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # Same minor as the Dockerfile (python:3.12-slim).
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+  deploy_prod:
+    # prod deploy triggers, mirroring BotsService:
+    #   - manual workflow_dispatch, OR
+    #   - a PR merged into `master`, OR
+    #   - any push whose commit message contains `deploy to prod` (not a Merge).
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'closed' &&
+       github.event.pull_request.merged == true &&
+       github.event.pull_request.base.ref == 'master') ||
+      (github.event_name == 'push' &&
+       contains(github.event.head_commit.message, 'deploy to prod') &&
+       !startsWith(github.event.head_commit.message, 'Merge'))
+
+    needs: test
+    runs-on: [bot]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Fail in seconds rather than after a multi-minute image build. See the dev
+      # workflow for why these two specifically.
+      - name: Preflight - cluster access
+        run: |
+          set -euo pipefail
+          if ! kubectl version --request-timeout=10s >/dev/null 2>&1; then
+            echo "ERROR: kubectl on this runner cannot reach a cluster." >&2
+            echo "       Point its kubeconfig at ${{ env.ENVIRONMENT }} (see deploy/README.md)." >&2
+            exit 1
+          fi
+          for verb in get patch; do
+            if ! kubectl -n "$NAMESPACE" auth can-i "$verb" deployment >/dev/null 2>&1; then
+              echo "ERROR: no permission to $verb deployments in namespace $NAMESPACE." >&2
+              exit 1
+            fi
+          done
+          echo "cluster: $(kubectl config current-context), can write in $NAMESPACE"
+
+      # See the dev workflow for why ambient runner credentials may not cover
+      # this registry.
+      - name: Log in to the registry
+        env:
+          SA_KEY: ${{ secrets.YC_CR_SA_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SA_KEY:-}" ]; then
+            printf '%s' "$SA_KEY" | docker login "$REGISTRY" --username json_key --password-stdin
+            echo "authenticated to $REGISTRY with the YC_CR_SA_KEY service account"
+          else
+            echo "::warning::YC_CR_SA_KEY is not set - relying on the runner's ambient $REGISTRY credentials."
+          fi
+
+      - name: Setup Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          name: lite-scaler-builder
+          cleanup: false
+
+      - name: Build and Push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.REPO }}:buildcache,mode=max,compression=zstd,image-manifest=true,oci-mediatypes=true
+
+      - name: Deploy (kustomize)
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'overlay-default' }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REPO}:${IMAGE_TAG}"
+          echo "Deploying $ENVIRONMENT overlay with image $IMAGE (dry_run: $DRY_RUN)"
+
+          # Pin the freshly-built image into the rendered manifest. The pattern is
+          # derived from $REPO (with dots escaped) rather than hardcoded, so
+          # changing the registry cannot silently stop matching and ship whatever
+          # tag the overlay happens to carry.
+          REPO_RE="${REPO//./\\.}"
+
+          render() {
+            kubectl kustomize "$OVERLAY" \
+              | sed -E "s#^([[:space:]]*)image:[[:space:]]*${REPO_RE}:.*#\1image: ${IMAGE}#"
+          }
+
+          if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "false" ]; then
+            render | sed -E "s/^([[:space:]]*)dry_run:[[:space:]]*(true|false).*/\1dry_run: ${DRY_RUN}/" > manifest.yaml
+          else
+            render > manifest.yaml
+          fi
+
+          # Deploying the wrong version silently is worse than failing here.
+          grep -qF "image: ${IMAGE}" manifest.yaml || {
+            echo "ERROR: rendered manifest does not reference ${IMAGE}" >&2
+            grep -n 'image:' manifest.yaml >&2
+            exit 1
+          }
+
+          kubectl apply -f manifest.yaml
+
+          # The ConfigMap is a plain resource, not a configMapGenerator, so it has
+          # no content hash in its name and changing config.yaml alone leaves the
+          # pod spec untouched — no rollout, and `rollout status` would report
+          # success while the pod keeps running the old config. Force a new pod.
+          kubectl -n "$NAMESPACE" rollout restart deploy/lite-scaler
+          kubectl -n "$NAMESPACE" rollout status deploy/lite-scaler --timeout=120s
+
+      # A Ready pod proves only that the HTTP port is up. On prod there is a
+      # known way to be healthy and useless: `worker-prod` is still an auto_scale
+      # group, and app/yc.py reads scale_policy.fixed_scale.size, which is 0
+      # there. The stability gate then blocks every decision and the scaler is a
+      # silent no-op. Catch that here instead of discovering it during an
+      # incident.
+      - name: Verify the scaler is not a silent no-op
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 12); do
+            LOGS="$(kubectl -n "$NAMESPACE" logs -l app=lite-scaler --tail=200 || true)"
+            if grep -q "desired size 0," <<<"$LOGS"; then
+              echo "ERROR: the scaler reads desired size 0 for its node group." >&2
+              echo "       That is what an auto_scale group looks like to app/yc.py." >&2
+              echo "       Convert worker-prod to fixed_scale before deploying here" >&2
+              echo "       (k8s-terraform, yandex_kubernetes_node_group.external_scaled)." >&2
+              grep -m3 "Node group state:" <<<"$LOGS" >&2
+              exit 1
+            fi
+            if grep -q "app.scaling: decide:" <<<"$LOGS"; then
+              echo "scaler is polling and reaching decisions:"
+              grep -E "app.(scaling|service): (decide|Decision):" <<<"$LOGS" | tail -5
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "ERROR: no scaling decision logged within 120s - the pod is Ready but idle." >&2
+          kubectl -n "$NAMESPACE" logs -l app=lite-scaler --tail=100 >&2
+          exit 1

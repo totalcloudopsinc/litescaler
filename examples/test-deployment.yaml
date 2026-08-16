@@ -26,7 +26,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: sleeper
-          image: cr.yandex/crph9fp6537285vojlnc/demo:latest
+          image: cr.yandex/crpcvsde88m85as3hdu0/demo:latest
           resources:
             requests:
               cpu: "500m"

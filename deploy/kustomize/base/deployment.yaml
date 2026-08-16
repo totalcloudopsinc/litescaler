@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: lite-scaler
-          image: cr.yandex/crph9fp6537285vojlnc/lite-scaller:latest
+          image: cr.yandex/crpcvsde88m85as3hdu0/lite-scaler:latest
           env:
             - name: CONFIG_PATH
               value: /config/config.yaml
@@ -30,7 +30,7 @@ spec:
       volumes:
         - name: sa-key
           secret:
-            secretName: lite-scaller-sa
+            secretName: lite-scaler-sa
         - name: config
           configMap:
-            name: lite-scaller-config
+            name: lite-scaler-config
