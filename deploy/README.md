@@ -124,12 +124,16 @@ unmet demand after free capacity: 12280m cpu -> 1.55 nodes by cpu
 
 Two pods never scheduled, which exposed the capacity-accounting flaw below.
 
-### Free capacity is summed across nodes, but scheduling is per-node
+### Free capacity was summed across nodes, but scheduling is per-node — FIXED
 
-`decide` subtracts the group's **total** free CPU from pending demand. Scheduling
-is bin-packing, so a remainder too small for one pod is unusable — yet still
-counted. `group_free_capacity()` sums the per-node remainders into one number, so
-the distribution never reaches `decide` at all.
+> Fixed upstream in `totalcloudopsinc/litescaler@e8496ae`, merged into this fork
+> in `dad332b`. Kept here because both symptoms below were found on this cluster
+> and the numbers are the ones the fix is now regression-tested against.
+
+`decide` subtracted the group's **total** free CPU from pending demand. Scheduling
+is bin-packing, so a remainder too small for one pod is unusable — yet was still
+counted. `group_free_capacity()` summed the per-node remainders into one number,
+so the distribution never reached `decide` at all.
 
 Straight from the scaler's log at the moment it sized the resize:
 
@@ -150,16 +154,41 @@ could take a pod — and all of it was deducted anyway. Without the deduction:
 the eight pods never scheduled. They were already in `_handled_pods` by then, so
 no later poll retried them.
 
-Counting only per-node remainders that are at least one pod's request would fix
-it. `tests/test_scaling_fragmentation.py` reproduces the decision without a
-cluster and will start failing when that changes.
+A second run on 2026-08-13, with `max_size` temporarily raised to 10 to rule the
+cap out as a confound, showed the sharper form — the scaler idle while pods were
+stuck and three nodes of headroom went unused:
 
-### dry_run is not side-effect free
+```
+Pending pods: 2 unscheduled, 2 already accounted for by an earlier resize, 0 new
+Free capacity across 7 Ready node(s): 9480m cpu / 40.57Gi memory
+decide: pending=0 (threshold 0), ... size 7 (min 3, max 10), headroom 10%
+Decision: 0 pending pods <= threshold 0; no action
+```
 
-`service.py` records pods in `_handled_pods` whether or not the resize was
-actually issued. A dry run therefore consumes the pods it "would" have scaled
-for, and flipping `dry_run` to `false` afterwards finds nothing new to act on.
-Restart the pod when changing the flag — that set is in-memory only.
+Kubernetes on the same two pods: `0/23 nodes are available: ... 7 Insufficient
+cpu`. On paper 9480m is four pods; in reality it was zero, in seven pieces of
+1440m and one of 840m.
+
+**How it was fixed.** `group_free_capacity()` now returns a per-node list
+(`NodeFree`), and `decide` runs a packing simulation — `_pack`, first-fit
+decreasing by dominant resource share, best-fit slot choice — then takes
+`max(demand_nodes, fit_nodes)`. Replayed against the merged code, the first
+decision becomes `3 -> 6 (+3)` and the second `7 -> 8 (+1)`, both with the reason
+`... free in the group, but fragmented across N nodes`.
+`tests/test_scaling_fragmentation.py` pins both, plus a control proving that
+genuinely usable gaps are still consumed before nodes are added.
+
+### dry_run was not side-effect free — FIXED
+
+> Same upstream commit: `_handled_pods` is gone entirely.
+
+`service.py` recorded pods in `_handled_pods` whether or not the resize was
+actually issued. A dry run therefore consumed the pods it "would" have scaled
+for, and flipping `dry_run` to `false` afterwards found nothing new to act on;
+the flag needed a pod restart to take effect. The set was also what kept the two
+stranded pods above from being retried. Every poll now reconsiders all pending
+pods from scratch — double-counting is prevented by the packing step instead,
+which sees the free space on nodes a previous resize already added.
 
 ## Known limitations (observed on the MyMeet cluster, 2026-08-12)
 
@@ -198,6 +227,12 @@ lose, unless the group is genuinely dedicated to the selected pods.
 | Scaler runs on | `workload=infra` (tolerates `dedicated=infra`) | same |
 | `dry_run` | `false` — live since the 2026-08-13 scale test | `true` — **blocked**, see below |
 | Ready to scale for real | after the dry-run logs check out | no |
+| Image | pre-`e8496ae` — **still has the packing bug** | not deployed |
+
+**The dev pod is running the old algorithm.** The image in the cluster was built
+before the upstream fix was merged; the capacity accounting it uses is the one
+described under [the scale test](#live-scale-test-on-dev-2026-08-13). Rebuild and
+push to pick up the fix.
 
 **prod is not ready.** `worker-prod` is still an `auto_scale` group owned by the
 Yandex cluster-autoscaler. This scaler only understands `fixed_scale`
