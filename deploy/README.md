@@ -23,24 +23,50 @@ The cluster and node group are **pre-existing** — Terraform references them.
 
 ### Checklist to make CI usable
 
-1. **Runner access.** Add `MyMeetAI/litescaler` to the runner group that owns
-   the `bot` runner (org settings → Actions → Runner groups). A repo-scoped
-   runner registered only on BotsService cannot be shared.
-2. **Registry push rights.** CI pushes to `crpcvsde88m85as3hdu0` (ours), while
-   the runner's existing credentials were set up for `crp2u89d0h0f91016d6q`
-   (BotsService). Ambient credentials work only if the runner's identity holds
-   `container-registry.images.pusher` at **folder** level. Otherwise set the repo
-   secret `YC_CR_SA_KEY` to a service-account key JSON with that role on our
-   registry — the `Log in to the registry` step uses it when present and warns
-   when it is absent.
-3. **Cluster write access in `kube-system`.** The runner's kubeconfig is used
-   as-is. BotsService only ever writes to `bot-dev`/`bot-prod`, so its identity
-   may not be able to touch `kube-system`. The `Preflight - cluster access` step
-   checks `kubectl auth can-i` for this and fails in seconds instead of after the
-   image build.
+**1. Repository access to the runner — the only certain blocker.**
+Two labels are in use across the org: `[bot]` (BotsService) and `[org]`
+(CalendarService), plus `review` for the PR-review workflows. Two different
+repos sharing labels means the runners are registered at organisation level, so
+this is a runner-*group* membership question, not a new-runner question:
 
-Each item fails loudly and specifically, so running the workflow once is a
-reasonable way to find out which of the three is missing.
+> org settings → Actions → Runner groups → the group owning the runner →
+> Repository access → add `MyMeetAI/litescaler`.
+
+Prefer `[org]`: `[bot]` belongs to the BotsService builder (a ~1.3 GB image with
+Chrome and a warm BuildKit cache for it), while CalendarService's use of `[org]`
+shows it is the general-purpose one, which is the closer fit for a small Python
+image. The label only decides which runner picks the job — access is the group.
+
+**2. Registry push rights — nothing to do.**
+Checked on 2026-08-16: our `lite-scaler` registry (`crpcvsde88m85as3hdu0`) and
+the `mymeet-k8s` one the other repos push to (`crp2u89d0h0f91016d6q`) live in the
+**same folder** `b1gs6pmsqltug8ii0j5d`, and *neither* has registry-scoped access
+bindings — all grants are folder-level, so they apply to both registries
+identically:
+
+| Service account | Folder-level role |
+|:--|:--|
+| `cicd-runner` | `container-registry.images.pusher` |
+| `k8s-cicd-runner` | `container-registry.editor` |
+
+Whichever of these the runner uses can already push to ours. The
+`YC_CR_SA_KEY` secret exists only as an override if that ever stops being true;
+leaving it unset is expected and only logs a warning.
+
+**3. Cluster write access in `kube-system` — probably fine, verified on first run.**
+`cicd-runner` holds `k8s.cluster-api.editor` at folder level, which Yandex maps
+to the built-in `edit` ClusterRole across all namespaces, `kube-system`
+included. Note this is different from `k8s.editor`, which only grants management
+of clusters through the cloud API and nothing inside them.
+
+**4. `kubectl` on the runner.** BotsService and CalendarService both deploy with
+`helm` and never call `kubectl`, so the binary may be absent even though a
+working kubeconfig is present. We need >= 1.27 for the built-in
+`kubectl kustomize`.
+
+Items 1, 3 and 4 each fail loudly and specifically in the `Preflight` step, in
+seconds rather than after the image build, so one run of the workflow is a
+reasonable way to find out which are actually missing.
 
 Day-to-day deploys are meant to go through CI, like BotsService. Two workflows
 build+push the image and apply the matching Kustomize overlay on the self-hosted

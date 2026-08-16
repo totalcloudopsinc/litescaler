@@ -77,6 +77,12 @@ jobs:
       - name: Preflight - cluster access
         run: |
           set -euo pipefail
+          # The other repos on this runner deploy with helm and never invoke
+          # kubectl, so it may simply not be installed.
+          command -v kubectl >/dev/null 2>&1 || {
+            echo "ERROR: kubectl is not installed on this runner (needs >= 1.27)." >&2
+            exit 1
+          }
           if ! kubectl version --request-timeout=10s >/dev/null 2>&1; then
             echo "ERROR: kubectl on this runner cannot reach a cluster." >&2
             echo "       Point its kubeconfig at ${{ env.ENVIRONMENT }} (see deploy/README.md)." >&2
