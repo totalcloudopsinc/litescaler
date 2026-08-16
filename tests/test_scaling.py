@@ -137,8 +137,7 @@ def test_free_capacity_covers_demand_no_scale():
         node_mem_bytes=NODE_MEM,
         current_size=2,
         config=cfg(),
-        free_cpu_millicores=8000,
-        free_mem_bytes=4 * 1024**3,
+        free_by_node=[(4000, 2 * 1024**3), (4000, 2 * 1024**3)],
     )
     assert d.should_scale is False
     assert d.target_size == 2
@@ -154,12 +153,97 @@ def test_free_capacity_only_covers_part_scales_for_shortfall():
         node_mem_bytes=NODE_MEM,
         current_size=1,
         config=cfg(),
-        free_cpu_millicores=4000,
-        free_mem_bytes=0,
+        free_by_node=[(4000, 0)],
     )
     assert d.should_scale is True
     assert d.nodes_to_add == 2
     assert d.target_size == 3
+
+
+FRAG_NODE_CPU = 7910
+FRAG_NODE_MEM = 32 * 1024**3
+
+
+def test_fragmented_free_capacity_still_scales():
+    d = decide(
+        pending_count=2,
+        sum_cpu_millicores=4000,
+        sum_mem_bytes=2 * 1024**3,
+        node_cpu_millicores=FRAG_NODE_CPU,
+        node_mem_bytes=FRAG_NODE_MEM,
+        current_size=7,
+        config=cfg(pending_pod_threshold=0),
+        free_by_node=[(1440, 5 * 1024**3)] * 7,
+        pod_requests=[(2000, 1 * 1024**3), (2000, 1 * 1024**3)],
+    )
+    assert d.should_scale is True
+    assert d.nodes_to_add == 1
+    assert d.target_size == 8
+    assert "fit" in d.reason.lower()
+
+
+def test_fragmented_memory_still_scales():
+    d = decide(
+        pending_count=1,
+        sum_cpu_millicores=500,
+        sum_mem_bytes=8 * 1024**3,
+        node_cpu_millicores=FRAG_NODE_CPU,
+        node_mem_bytes=FRAG_NODE_MEM,
+        current_size=4,
+        config=cfg(pending_pod_threshold=0),
+        free_by_node=[(4000, 3 * 1024**3)] * 4,
+        pod_requests=[(500, 8 * 1024**3)],
+    )
+    assert d.should_scale is True
+    assert d.nodes_to_add == 1
+
+
+def test_pods_that_fit_on_one_node_do_not_scale():
+    d = decide(
+        pending_count=2,
+        sum_cpu_millicores=2000,
+        sum_mem_bytes=2 * 1024**3,
+        node_cpu_millicores=FRAG_NODE_CPU,
+        node_mem_bytes=FRAG_NODE_MEM,
+        current_size=3,
+        config=cfg(pending_pod_threshold=0),
+        free_by_node=[(1440, 5 * 1024**3), (7910, 32 * 1024**3)],
+        pod_requests=[(1000, 1 * 1024**3), (1000, 1 * 1024**3)],
+    )
+    assert d.should_scale is False
+    assert "free capacity" in d.reason.lower()
+
+
+def test_packing_opens_one_node_per_oversized_pod():
+    d = decide(
+        pending_count=4,
+        sum_cpu_millicores=20_000,
+        sum_mem_bytes=4 * 1024**3,
+        node_cpu_millicores=8000,
+        node_mem_bytes=32 * 1024**3,
+        current_size=1,
+        config=cfg(pending_pod_threshold=0),
+        free_by_node=[(0, 0)],
+        pod_requests=[(5000, 1 * 1024**3)] * 4,
+    )
+    assert d.should_scale is True
+    assert d.nodes_to_add == 4
+
+
+def test_pod_bigger_than_a_whole_node_does_not_scale():
+    d = decide(
+        pending_count=1,
+        sum_cpu_millicores=16_000,
+        sum_mem_bytes=1 * 1024**3,
+        node_cpu_millicores=8000,
+        node_mem_bytes=32 * 1024**3,
+        current_size=2,
+        config=cfg(pending_pod_threshold=0),
+        free_by_node=[(0, 0), (0, 0)],
+        pod_requests=[(16_000, 1 * 1024**3)],
+    )
+    assert d.should_scale is False
+    assert "node" in d.reason.lower()
 
 
 from app.scaling import decide_manual  # noqa: E402

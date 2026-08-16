@@ -18,7 +18,27 @@ class ScaleRequest(BaseModel):
         ge=1, description="How many nodes to add (clamped to max_size)."
     )
 
-logging.basicConfig(level=logging.INFO)
+LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S%z"
+
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def configure_logging(level: int | str = logging.INFO) -> None:
+    logging.basicConfig(level=level, format=LOG_FORMAT, datefmt=LOG_DATEFMT)
+    for name in _UVICORN_LOGGERS:
+        for handler in logging.getLogger(name).handlers:
+            formatter = handler.formatter
+            fmt = getattr(formatter, "_fmt", None)
+            if not fmt or "%(asctime)s" in fmt:
+                continue
+
+            handler.setFormatter(
+                type(formatter)(f"%(asctime)s {fmt}", datefmt=LOG_DATEFMT)
+            )
+
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
