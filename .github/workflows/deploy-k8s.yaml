@@ -25,6 +25,29 @@ env:
   NAMESPACE: kube-system
 
 jobs:
+  # Runs on every push, including branches that never deploy. The suite is pure
+  # Python and takes about a second, so it stays on a GitHub-hosted runner
+  # rather than occupying the shared self-hosted [bot] machine.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Same minor as the Dockerfile (python:3.12-slim); pydantic-core has no
+          # wheels for every newer interpreter and would try to build from source.
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
   deploy_dev:
     # dev deploy triggers, mirroring BotsService:
     #   - manual workflow_dispatch, OR
@@ -35,10 +58,50 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
       (github.event_name == 'push' && contains(github.event.head_commit.message, 'deploy to dev') && !startsWith(github.event.head_commit.message, 'Merge'))
 
+    needs: test
     runs-on: [bot]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # Fail in seconds rather than after a multi-minute image build. Both checks
+      # below are the two ways this deploy is known to break on a fresh runner:
+      # no kubeconfig, or a kubeconfig whose identity cannot touch kube-system
+      # (the runner's day job is BotsService, which only ever writes to bot-dev).
+      - name: Preflight - cluster access
+        run: |
+          set -euo pipefail
+          if ! kubectl version --request-timeout=10s >/dev/null 2>&1; then
+            echo "ERROR: kubectl on this runner cannot reach a cluster." >&2
+            echo "       Point its kubeconfig at ${{ env.ENVIRONMENT }} (see deploy/README.md)." >&2
+            exit 1
+          fi
+          for verb in get patch; do
+            if ! kubectl -n "$NAMESPACE" auth can-i "$verb" deployment >/dev/null 2>&1; then
+              echo "ERROR: no permission to $verb deployments in namespace $NAMESPACE." >&2
+              echo "       The runner identity needs write access there, not just in bot-dev." >&2
+              exit 1
+            fi
+          done
+          echo "cluster: $(kubectl config current-context), can write in $NAMESPACE"
+
+      # The runner already holds cr.yandex credentials for the BotsService
+      # registry. Ours is a different registry in the same folder, so ambient
+      # credentials work only if the runner's identity carries the pusher role at
+      # FOLDER level. Setting YC_CR_SA_KEY makes it deterministic instead: a
+      # service account key JSON with container-registry.images.pusher on
+      # crpcvsde88m85as3hdu0.
+      - name: Log in to the registry
+        env:
+          SA_KEY: ${{ secrets.YC_CR_SA_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SA_KEY:-}" ]; then
+            printf '%s' "$SA_KEY" | docker login "$REGISTRY" --username json_key --password-stdin
+            echo "authenticated to $REGISTRY with the YC_CR_SA_KEY service account"
+          else
+            echo "::warning::YC_CR_SA_KEY is not set - relying on the runner's ambient $REGISTRY credentials. If the push below fails with 'denied: Permission denied', that identity lacks the pusher role on ${REPO%/*}."
+          fi
 
       # Persistent builder on the self-hosted runner: keeps BuildKit state
       # (incl. RUN cache mounts) across runs.
@@ -54,6 +117,10 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
+          # The cluster runs amd64 nodes. The runner is amd64 too, so this is a
+          # native build, but pinning it keeps the image correct if the runner
+          # fleet ever gains arm64 machines.
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.REPO }}:latest
@@ -61,10 +128,8 @@ jobs:
           cache-from: type=registry,ref=${{ env.REPO }}:buildcache
           cache-to: type=registry,ref=${{ env.REPO }}:buildcache,mode=max,compression=zstd,image-manifest=true,oci-mediatypes=true
 
-      # Deploy the dev overlay. kubectl on the [bot] runner is expected to be
-      # pointed at the cluster already (same assumption BotsService makes for
-      # helm). The rendered manifest gets the freshly-built image pinned by SHA,
-      # and dry_run is optionally overridden for this run.
+      # Deploy the dev overlay. The rendered manifest gets the freshly-built
+      # image pinned by SHA, and dry_run is optionally overridden for this run.
       - name: Deploy (kustomize)
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run || 'overlay-default' }}
@@ -105,3 +170,23 @@ jobs:
           # success while the pod keeps running the old config. Force a new pod.
           kubectl -n "$NAMESPACE" rollout restart deploy/lite-scaler
           kubectl -n "$NAMESPACE" rollout status deploy/lite-scaler --timeout=120s
+
+      # `rollout status` returns as soon as the pod is Ready, which for this
+      # scaler only means the HTTP port is up. A config it cannot act on (wrong
+      # node group, missing SA key) still looks healthy at that point.
+      - name: Verify the scaler reached a decision
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 12); do
+            if kubectl -n "$NAMESPACE" logs -l app=lite-scaler --tail=200 \
+                 | grep -q "app.scaling: decide:"; then
+              echo "scaler is polling and reaching decisions:"
+              kubectl -n "$NAMESPACE" logs -l app=lite-scaler --tail=200 \
+                | grep -E "app.(scaling|service): (decide|Decision):" | tail -5
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "ERROR: no scaling decision logged within 120s - the pod is Ready but idle." >&2
+          kubectl -n "$NAMESPACE" logs -l app=lite-scaler --tail=100 >&2
+          exit 1

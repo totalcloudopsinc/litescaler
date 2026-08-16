@@ -30,6 +30,27 @@ env:
   NAMESPACE: kube-system
 
 jobs:
+  # Same gate as the dev workflow. Kept as its own job rather than a `needs` on
+  # the dev workflow's job, because workflows cannot depend on each other.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Same minor as the Dockerfile (python:3.12-slim).
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
   deploy_prod:
     # prod deploy triggers, mirroring BotsService:
     #   - manual workflow_dispatch, OR
@@ -45,10 +66,43 @@ jobs:
        contains(github.event.head_commit.message, 'deploy to prod') &&
        !startsWith(github.event.head_commit.message, 'Merge'))
 
+    needs: test
     runs-on: [bot]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      # Fail in seconds rather than after a multi-minute image build. See the dev
+      # workflow for why these two specifically.
+      - name: Preflight - cluster access
+        run: |
+          set -euo pipefail
+          if ! kubectl version --request-timeout=10s >/dev/null 2>&1; then
+            echo "ERROR: kubectl on this runner cannot reach a cluster." >&2
+            echo "       Point its kubeconfig at ${{ env.ENVIRONMENT }} (see deploy/README.md)." >&2
+            exit 1
+          fi
+          for verb in get patch; do
+            if ! kubectl -n "$NAMESPACE" auth can-i "$verb" deployment >/dev/null 2>&1; then
+              echo "ERROR: no permission to $verb deployments in namespace $NAMESPACE." >&2
+              exit 1
+            fi
+          done
+          echo "cluster: $(kubectl config current-context), can write in $NAMESPACE"
+
+      # See the dev workflow for why ambient runner credentials may not cover
+      # this registry.
+      - name: Log in to the registry
+        env:
+          SA_KEY: ${{ secrets.YC_CR_SA_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${SA_KEY:-}" ]; then
+            printf '%s' "$SA_KEY" | docker login "$REGISTRY" --username json_key --password-stdin
+            echo "authenticated to $REGISTRY with the YC_CR_SA_KEY service account"
+          else
+            echo "::warning::YC_CR_SA_KEY is not set - relying on the runner's ambient $REGISTRY credentials."
+          fi
 
       - name: Setup Docker Buildx
         id: buildx
@@ -62,6 +116,7 @@ jobs:
         with:
           builder: ${{ steps.buildx.outputs.name }}
           context: .
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.REPO }}:${{ env.IMAGE_TAG }}
@@ -108,3 +163,33 @@ jobs:
           # success while the pod keeps running the old config. Force a new pod.
           kubectl -n "$NAMESPACE" rollout restart deploy/lite-scaler
           kubectl -n "$NAMESPACE" rollout status deploy/lite-scaler --timeout=120s
+
+      # A Ready pod proves only that the HTTP port is up. On prod there is a
+      # known way to be healthy and useless: `worker-prod` is still an auto_scale
+      # group, and app/yc.py reads scale_policy.fixed_scale.size, which is 0
+      # there. The stability gate then blocks every decision and the scaler is a
+      # silent no-op. Catch that here instead of discovering it during an
+      # incident.
+      - name: Verify the scaler is not a silent no-op
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 12); do
+            LOGS="$(kubectl -n "$NAMESPACE" logs -l app=lite-scaler --tail=200 || true)"
+            if grep -q "desired size 0," <<<"$LOGS"; then
+              echo "ERROR: the scaler reads desired size 0 for its node group." >&2
+              echo "       That is what an auto_scale group looks like to app/yc.py." >&2
+              echo "       Convert worker-prod to fixed_scale before deploying here" >&2
+              echo "       (k8s-terraform, yandex_kubernetes_node_group.external_scaled)." >&2
+              grep -m3 "Node group state:" <<<"$LOGS" >&2
+              exit 1
+            fi
+            if grep -q "app.scaling: decide:" <<<"$LOGS"; then
+              echo "scaler is polling and reaching decisions:"
+              grep -E "app.(scaling|service): (decide|Decision):" <<<"$LOGS" | tail -5
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "ERROR: no scaling decision logged within 120s - the pod is Ready but idle." >&2
+          kubectl -n "$NAMESPACE" logs -l app=lite-scaler --tail=100 >&2
+          exit 1

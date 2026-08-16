@@ -8,14 +8,39 @@ the manifests: a `base/` plus one overlay per environment that sets the per-env
 
 The cluster and node group are **pre-existing** — Terraform references them.
 
-## Deploy via GitHub Actions (intended, NOT yet usable)
+## Deploy via GitHub Actions (blocked on runner access)
 
-> **There is no runner for this repo yet.** The workflows below are written and
-> committed, but nothing picks up their jobs — `runs-on: [bot]` is BotsService's
-> self-hosted runner label. Until a runner is attached, build and deploy by hand:
-> see [Manual build and push](#manual-build-and-push) below, then `./install.sh <env>`.
-> A push to a branch will not start anything by accident: the dev job additionally
+> **The `deploy_*` jobs still have no runner.** `runs-on: [bot]` is BotsService's
+> self-hosted runner label; whether it also serves this repo depends on the
+> runner being registered at org level with this repo in its runner group. Until
+> that is arranged, build and deploy by hand: see
+> [Manual build and push](#manual-build-and-push) below, then `./install.sh <env>`.
+> A push to a branch will not start a deploy by accident: the dev job additionally
 > requires the `dev` branch or `deploy to dev` in the commit message.
+>
+> The `test` job is **not** blocked — it runs on `ubuntu-latest` and gates both
+> deploy jobs via `needs: test`.
+
+### Checklist to make CI usable
+
+1. **Runner access.** Add `MyMeetAI/litescaler` to the runner group that owns
+   the `bot` runner (org settings → Actions → Runner groups). A repo-scoped
+   runner registered only on BotsService cannot be shared.
+2. **Registry push rights.** CI pushes to `crpcvsde88m85as3hdu0` (ours), while
+   the runner's existing credentials were set up for `crp2u89d0h0f91016d6q`
+   (BotsService). Ambient credentials work only if the runner's identity holds
+   `container-registry.images.pusher` at **folder** level. Otherwise set the repo
+   secret `YC_CR_SA_KEY` to a service-account key JSON with that role on our
+   registry — the `Log in to the registry` step uses it when present and warns
+   when it is absent.
+3. **Cluster write access in `kube-system`.** The runner's kubeconfig is used
+   as-is. BotsService only ever writes to `bot-dev`/`bot-prod`, so its identity
+   may not be able to touch `kube-system`. The `Preflight - cluster access` step
+   checks `kubectl auth can-i` for this and fails in seconds instead of after the
+   image build.
+
+Each item fails loudly and specifically, so running the workflow once is a
+reasonable way to find out which of the three is missing.
 
 Day-to-day deploys are meant to go through CI, like BotsService. Two workflows
 build+push the image and apply the matching Kustomize overlay on the self-hosted
@@ -28,6 +53,13 @@ build+push the image and apply the matching Kustomize overlay on the self-hosted
 
 Image tag = commit SHA (dev) / `prod-<sha>` (prod), pinned into the rendered
 manifest at deploy time.
+
+**Both deploys end with a verification step**, because `rollout status` returns
+as soon as the pod is Ready, which for this scaler only means its HTTP port is
+up. The step tails the log until a real decision appears. The prod variant also
+fails explicitly on `desired size 0` — the signature of pointing the scaler at
+an `auto_scale` group, where it runs as a silent no-op (see
+[prod is not ready](#current-state-per-environment)).
 
 **dry_run per deploy.** Each workflow has a `workflow_dispatch` input `dry_run`
 with `overlay-default | true | false`. `overlay-default` keeps the overlay's
