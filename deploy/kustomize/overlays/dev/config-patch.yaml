@@ -22,7 +22,13 @@ data:
     scaling:
       pending_pod_threshold: 0
       headroom: 0.10
-      max_size: 6                       # the ceiling worker-dev had as auto_scale
+      # Raised 6 -> 20 on 2026-08-19. The 6 was inherited from the old
+      # auto_scale group and turned out to be the binding limit: real dev
+      # load left 27 pods queued while the scaler asked for 15 nodes. Nothing
+      # in the cloud enforces a ceiling here - the group is fixed_scale, and
+      # folder quotas allow ~99 more nodes of this size - so this number is
+      # purely a cost guard. prod's group carries 45 for comparison.
+      max_size: 20
       # min_size 3, NOT 0: scale-down counts a node "empty" when it carries no pod
       # matching the selectors above, but worker-dev nodes also host bot-dev-main,
       # calendar-dev-app and scheduler-dev-app. Yandex picks which node to drain,
