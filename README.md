@@ -190,38 +190,16 @@ The base Deployment exposes the port as `metrics` and carries the
 `prometheus.io/{scrape,port,path}` pod annotations, so a cluster running the
 annotation-based scrape config picks the pod up with no extra configuration.
 
-**Decision inputs** (Gauge, refreshed every poll): `litescaler_pending_pods`,
-`litescaler_pending_demand_cpu_millicores`,
-`litescaler_pending_demand_memory_bytes`,
-`litescaler_group_free_cpu_millicores`, `litescaler_group_free_memory_bytes`,
-`litescaler_node_capacity_cpu_millicores`,
-`litescaler_node_capacity_memory_bytes`. The capacity gauges hold their last
-measured value while a poll is gated, since a gated poll never reads them.
+Exposed are the scaling decision inputs (pending pods and their CPU/memory
+demand, free capacity in the group, node size), the group state (desired size,
+Ready nodes, resize in progress, configured bounds, `dry_run`), the decisions
+themselves (`direction` x `result`, nodes added and removed, evaluations
+skipped by a gate) and loop health (Yandex Cloud API errors per operation, IAM
+token mints, poll iterations, errors and duration, last poll timestamp, build
+info).
 
-**Group state** (Gauge): `litescaler_node_group_size` (desired size),
-`litescaler_ready_nodes`, `litescaler_resize_in_progress`,
-`litescaler_max_size`, `litescaler_min_size`, `litescaler_dry_run`.
-
-**Decisions and actions** (Counter):
-`litescaler_scale_decisions_total{direction,result}` where `direction` is
-`up|down|none` and `result` is `applied|dry_run|capped|gated` (first match
-wins, in the order gated, capped, dry_run, applied);
-`litescaler_nodes_added_total{node_group_id}`,
-`litescaler_nodes_removed_total{node_group_id}` — counted only for resizes that
-were actually sent to Yandex Cloud, so `dry_run` never inflates them;
-`litescaler_evaluations_gated_total{reason}` with `reason` one of
-`transitioning|operation_in_progress` — unbounded growth here while pods stay
-pending means the scaler is frozen behind a resize.
-
-**Yandex Cloud API and loop health**:
-`litescaler_yc_api_errors_total{op}` with `op` one of
-`get_size|update|get_operation|iam_token`; `litescaler_iam_token_mints_total`;
-`litescaler_poll_iterations_total`; `litescaler_poll_errors_total`;
-`litescaler_poll_duration_seconds` (Histogram, buckets up to 120s);
-`litescaler_last_poll_timestamp_seconds` (Unix time, for a staleness alert);
-`litescaler_build_info{version}` (always 1, version from `LITESCALER_VERSION`
-or the package version).
-
+See **[MONITORING.md](MONITORING.md)** for the full metric reference, scrape
+configuration, alerting rules and dashboard queries.
 
 ## Build the image
 

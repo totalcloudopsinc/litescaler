@@ -142,7 +142,7 @@ def record_decision(
             reason=gated_reason
         ).inc()
 
-    if result != _RESULT_APPLIED or not should_scale:
+    if gated_reason or dry_run or not should_scale:
         return
     if nodes_to_add > 0:
         _COUNTERS["litescaler_nodes_added_total"].labels(

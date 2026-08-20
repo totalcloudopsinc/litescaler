@@ -195,3 +195,21 @@ def test_poll_duration_buckets_cover_slow_polls():
         assert _value("litescaler_poll_duration_seconds_bucket", le=le) is not None
     assert _value("litescaler_poll_duration_seconds_bucket", le="30.0") == 0
     assert _value("litescaler_poll_duration_seconds_bucket", le="60.0") == 1
+
+
+def test_a_capped_but_applied_scale_up_still_counts_the_nodes_it_added():
+    metrics.record_decision(
+        direction="up", nodes_to_add=3, capped=True, should_scale=True,
+        dry_run=False, node_group_id="cat1",
+    )
+
+    assert _value("litescaler_nodes_added_total", node_group_id="cat1") == 3
+
+
+def test_a_capped_but_applied_scale_down_still_counts_the_nodes_it_removed():
+    metrics.record_decision(
+        direction="down", nodes_to_add=-2, capped=True, should_scale=True,
+        dry_run=False, node_group_id="cat1",
+    )
+
+    assert _value("litescaler_nodes_removed_total", node_group_id="cat1") == 2
