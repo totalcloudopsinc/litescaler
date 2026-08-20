@@ -21,3 +21,7 @@ scaling:
   node_capacity_fallback:           # used only if the node group has no Ready node
     cpu: 2
     memory_gib: 8
+
+metrics:
+  enabled: true                     # serve /metrics for Prometheus
+  port: 9090                        # separate port from the API

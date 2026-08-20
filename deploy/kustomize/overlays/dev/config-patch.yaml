@@ -46,3 +46,9 @@ data:
       node_capacity_fallback:           # matches worker-dev: standard-v3 8 vCPU / 16 GiB
         cpu: 8
         memory_gib: 16
+
+    # Added upstream in 6f6c222. Served on its own port so the scrape target is
+    # separate from the API.
+    metrics:
+      enabled: true
+      port: 9090

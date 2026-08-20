@@ -41,3 +41,10 @@ data:
       node_capacity_fallback:           # matches worker-prod: highfreq-v3 32 vCPU / 64 GiB
         cpu: 32
         memory_gib: 64
+
+    # Added upstream in 6f6c222. Stated explicitly rather than left to the
+    # MetricsConfig() default, because this patch replaces the whole config.yaml
+    # string — an omitted block here is invisible, not inherited from base.
+    metrics:
+      enabled: true
+      port: 9090

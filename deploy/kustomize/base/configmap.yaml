@@ -27,3 +27,7 @@ data:
       node_capacity_fallback:
         cpu: 2
         memory_gib: 8
+
+    metrics:
+      enabled: true
+      port: 9090

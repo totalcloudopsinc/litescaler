@@ -7,6 +7,12 @@ spec:
     spec:
       # Pin to a node the scaler never resizes. Landing on worker-dev — the group
       # it manages — would let its own scale-down drain the node it runs on.
+      #
+      # Upstream fills these placeholders with `lite-scaler=true` /
+      # `dedicated=lite-scaler` (dce62d5), which is their environment. We keep our
+      # own values: this cluster has no lite-scaler-labelled node, and the pod
+      # actually runs on the existing infra group. Expect this file to conflict on
+      # every upstream merge — ours wins.
       nodeSelector:
         workload: infra
       # infra nodes carry `dedicated=infra:NoSchedule`, so the nodeSelector alone

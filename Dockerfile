@@ -9,6 +9,6 @@ COPY app ./app
 COPY config.yaml ./config.yaml
 
 ENV CONFIG_PATH=/app/config.yaml
-EXPOSE 8000
+EXPOSE 8000 9090
 
 CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]

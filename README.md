@@ -171,6 +171,36 @@ curl -X POST localhost:8000/evaluate \
   -d '{"nodes_to_add": 3}'
 ```
 
+## Metrics
+
+Prometheus metrics are served on their own port (`9090` by default), separate
+from the API, so the scrape target never overlaps with `/evaluate`:
+
+```yaml
+metrics:
+  enabled: true
+  port: 9090
+```
+
+```bash
+curl localhost:9090/metrics
+```
+
+The base Deployment exposes the port as `metrics` and carries the
+`prometheus.io/{scrape,port,path}` pod annotations, so a cluster running the
+annotation-based scrape config picks the pod up with no extra configuration.
+
+Exposed are the scaling decision inputs (pending pods and their CPU/memory
+demand, free capacity in the group, node size), the group state (desired size,
+Ready nodes, resize in progress, configured bounds, `dry_run`), the decisions
+themselves (`direction` x `result`, nodes added and removed, evaluations
+skipped by a gate) and loop health (Yandex Cloud API errors per operation, IAM
+token mints, poll iterations, errors and duration, last poll timestamp, build
+info).
+
+See **[MONITORING.md](MONITORING.md)** for the full metric reference, scrape
+configuration, alerting rules and dashboard queries.
+
 ## Build the image
 
 ```bash
