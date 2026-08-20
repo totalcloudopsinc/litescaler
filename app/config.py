@@ -46,10 +46,16 @@ class ScalingConfig(BaseModel):
         return self
 
 
+class MetricsConfig(BaseModel):
+    enabled: bool = True
+    port: int = Field(default=9090, ge=1, le=65535)
+
+
 class Config(BaseModel):
     yandex_cloud: YandexCloudConfig
     kubernetes: KubernetesConfig
     scaling: ScalingConfig
+    metrics: MetricsConfig = MetricsConfig()
 
 
 def load_config(path: str) -> Config:

@@ -11,6 +11,10 @@ spec:
     metadata:
       labels:
         app: lite-scaler
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
     spec:
       containers:
         - name: lite-scaler
@@ -19,7 +23,10 @@ spec:
             - name: CONFIG_PATH
               value: /config/config.yaml
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
+            - name: metrics
+              containerPort: 9090
           volumeMounts:
             - name: sa-key
               mountPath: /secrets

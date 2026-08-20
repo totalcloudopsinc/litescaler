@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextlib import contextmanager
 
 import jwt
 from yandexcloud import SDK
@@ -20,7 +21,19 @@ from yandex.cloud.operation.operation_service_pb2 import GetOperationRequest
 from yandex.cloud.operation.operation_service_pb2_grpc import OperationServiceStub
 from google.protobuf.field_mask_pb2 import FieldMask
 
+from app import metrics
+
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _counting_errors(op: str):
+    try:
+        yield
+    except Exception:
+        metrics.record_yc_error(op)
+        raise
+
 
 _TOKEN_REFRESH_SKEW_SECONDS = 300
 _IAM_TOKEN_AUDIENCE = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
@@ -42,9 +55,10 @@ class YcClient:
         self._last_operation_id: str | None = None
 
     def get_current_size(self) -> int:
-        group = self._svc.Get(
-            GetNodeGroupRequest(node_group_id=self._node_group_id)
-        )
+        with _counting_errors("get_size"):
+            group = self._svc.Get(
+                GetNodeGroupRequest(node_group_id=self._node_group_id)
+            )
         return int(group.scale_policy.fixed_scale.size)
 
     def set_size(self, size: int) -> None:
@@ -55,7 +69,8 @@ class YcClient:
                 fixed_scale=ScalePolicy.FixedScale(size=size)
             ),
         )
-        operation = self._svc.Update(request)
+        with _counting_errors("update"):
+            operation = self._svc.Update(request)
         self._last_operation_id = getattr(operation, "id", None) or None
         logger.info(
             "Requested node-group %s resize to %d (operation %s)",
@@ -65,9 +80,10 @@ class YcClient:
     def operation_in_progress(self) -> bool:
         if not self._last_operation_id:
             return False
-        operation = self._ops.Get(
-            GetOperationRequest(operation_id=self._last_operation_id)
-        )
+        with _counting_errors("get_operation"):
+            operation = self._ops.Get(
+                GetOperationRequest(operation_id=self._last_operation_id)
+            )
         if getattr(operation, "done", False):
             self._last_operation_id = None
             return False
@@ -123,7 +139,9 @@ class YcKubeCredentials:
             algorithm="PS256",
             headers={"kid": self._sa_key["id"]},
         )
-        response = self._iam.Create(CreateIamTokenRequest(jwt=signed))
+        with _counting_errors("iam_token"):
+            response = self._iam.Create(CreateIamTokenRequest(jwt=signed))
+        metrics.record_iam_token_mint()
         self._token = response.iam_token
         expires_at = response.expires_at
         self._token_expiry = expires_at.seconds + expires_at.nanos / 1e9

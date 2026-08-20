@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from typing import Callable
 
 from fastapi import FastAPI, HTTPException
+from prometheus_client import start_http_server
 from pydantic import BaseModel, Field
 
-from app.config import load_config
+from app import metrics
+from app.config import Config, load_config
 from app.service import ScalerService
 
 
@@ -54,20 +58,53 @@ def _build_service() -> ScalerService:
     return ScalerService.from_config(config)
 
 
+def start_metrics_server(config: Config) -> None:
+    scaling = config.scaling
+    metrics.set_static(
+        max_size=scaling.max_size,
+        min_size=scaling.min_size,
+        dry_run=scaling.dry_run,
+        version=metrics.version(),
+    )
+    if not config.metrics.enabled:
+        logger.info("Metrics disabled; not serving /metrics")
+        return
+    start_http_server(config.metrics.port, registry=metrics.registry)
+    logger.info("Serving /metrics on port %d", config.metrics.port)
+
+
+async def _run_one_poll(
+    service: ScalerService,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], float] = time.time,
+) -> None:
+    started = monotonic()
+    failed = False
+    try:
+        await asyncio.to_thread(service.evaluate)
+    except Exception:  # noqa: BLE001 - loop must never die
+        failed = True
+        logger.exception("Evaluation failed in poll loop")
+    metrics.record_poll(
+        duration_seconds=monotonic() - started,
+        finished_at=wall_clock(),
+        failed=failed,
+    )
+
+
 async def _poll_loop(app: FastAPI):
     service: ScalerService = app.state.service
     interval = service.config.scaling.poll_interval_seconds
     while True:
-        try:
-            await asyncio.to_thread(service.evaluate)
-        except Exception:  # noqa: BLE001 - loop must never die
-            logger.exception("Evaluation failed in poll loop")
+        await _run_one_poll(service)
         await asyncio.sleep(interval)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.service = _build_service()
+    start_metrics_server(app.state.service.config)
     task = asyncio.create_task(_poll_loop(app))
     yield
     task.cancel()

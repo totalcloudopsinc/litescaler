@@ -326,3 +326,54 @@ curl -X POST localhost:8000/evaluate \
   -d '{"nodes_to_add": 3}'
 ```
 
+## Метрики
+
+Метрики Prometheus отдаются на отдельном порту (по умолчанию `9090`), отдельно
+от API, поэтому цель скрейпа никогда не пересекается с `/evaluate`:
+
+```yaml
+metrics:
+  enabled: true
+  port: 9090
+```
+
+```bash
+curl localhost:9090/metrics
+```
+
+Базовый Deployment объявляет порт `metrics` и аннотации пода
+`prometheus.io/{scrape,port,path}`, так что кластер со скрейпом по аннотациям
+подхватывает под без дополнительной настройки.
+
+**Входные данные решения** (Gauge, каждый poll): `litescaler_pending_pods`,
+`litescaler_pending_demand_cpu_millicores`,
+`litescaler_pending_demand_memory_bytes`,
+`litescaler_group_free_cpu_millicores`, `litescaler_group_free_memory_bytes`,
+`litescaler_node_capacity_cpu_millicores`,
+`litescaler_node_capacity_memory_bytes`. Пока poll заблокирован гейтом,
+метрики ёмкости сохраняют последнее измеренное значение — такой poll их
+не читает.
+
+**Состояние группы** (Gauge): `litescaler_node_group_size` (desired-размер),
+`litescaler_ready_nodes`, `litescaler_resize_in_progress`,
+`litescaler_max_size`, `litescaler_min_size`, `litescaler_dry_run`.
+
+**Решения и действия** (Counter):
+`litescaler_scale_decisions_total{direction,result}`, где `direction` —
+`up|down|none`, а `result` — `applied|dry_run|capped|gated` (побеждает первое
+совпадение в порядке gated, capped, dry_run, applied);
+`litescaler_nodes_added_total{node_group_id}`,
+`litescaler_nodes_removed_total{node_group_id}` — считаются только для
+резайзов, реально отправленных в Yandex Cloud, поэтому `dry_run` их не
+завышает; `litescaler_evaluations_gated_total{reason}`, где `reason` —
+`transitioning|operation_in_progress`; бесконечный рост при ненулевом pending
+означает, что скейлер заморожен за резайзом.
+
+**YC API и здоровье цикла**: `litescaler_yc_api_errors_total{op}`, где `op` —
+`get_size|update|get_operation|iam_token`; `litescaler_iam_token_mints_total`;
+`litescaler_poll_iterations_total`; `litescaler_poll_errors_total`;
+`litescaler_poll_duration_seconds` (Histogram, бакеты до 120с);
+`litescaler_last_poll_timestamp_seconds` (unix-время, для алерта «скейлер
+завис»); `litescaler_build_info{version}` (всегда 1, версия из
+`LITESCALER_VERSION` или из пакета).
+

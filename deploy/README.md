@@ -22,8 +22,8 @@ deploy/
 
 1. `terraform/envs/<env>.tfvars` — `folder_id`, `cluster_id`, `namespace`.
 2. `kustomize/overlays/<env>/config-patch.yaml` — `node_group_id`, `cluster_id`,
-   `namespace`, `label_selectors`, and scaling sizes (`max_size`, `min_size`,
-   `dry_run`, ...).
+   `namespace`, `label_selectors`, scaling sizes (`max_size`, `min_size`,
+   `dry_run`, ...), and the `metrics` block (`enabled`, `port`).
 3. `kustomize/overlays/<env>/kustomization.yaml` — `namespace` (must match the
    tfvars namespace) and the image `newTag`.
 4. `kustomize/overlays/<env>/deployment-patch.yaml` — the `nodeSelector` pinning
@@ -61,6 +61,10 @@ export YC_TOKEN="$(yc iam create-token)"          # or set TF_VAR_yc_service_acc
   the overlay, which is exactly what Kustomize overlays are for.
 
 ## Notes
+
+- The base Deployment exposes port `9090` as `metrics` and sets the
+  `prometheus.io/{scrape,port,path}` pod annotations. Keep the annotation port
+  in sync with `metrics.port` in the overlay's `config-patch.yaml`.
 
 - The embedded `config.yaml` string is overridden **whole** per overlay (an
   embedded YAML string can't be patched field-by-field), so each overlay carries

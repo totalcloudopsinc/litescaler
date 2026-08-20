@@ -1,7 +1,7 @@
 import math
 
 from app.config import ScalingConfig
-from app.scaling import Decision, decide
+from app.scaling import Decision, decide, decide_manual, decide_scale_down
 
 
 def cfg(**kw):
@@ -305,3 +305,89 @@ def test_scale_down_already_at_floor_no_action():
     assert d.should_scale is False
     assert d.target_size == 1
     assert d.nodes_to_add == 0
+
+
+def _up_config(**kw):
+    return ScalingConfig(headroom=0.0, pending_pod_threshold=0, **kw)
+
+
+def test_scale_up_within_max_size_is_not_capped():
+    decision = decide(
+        pending_count=1, sum_cpu_millicores=2000, sum_mem_bytes=8 * 1024**3,
+        node_cpu_millicores=2000, node_mem_bytes=8 * 1024**3,
+        current_size=1, config=_up_config(max_size=10),
+    )
+
+    assert decision.direction == "up"
+    assert decision.capped is False
+
+
+def test_scale_up_clamped_by_max_size_is_capped():
+    decision = decide(
+        pending_count=4, sum_cpu_millicores=8000, sum_mem_bytes=32 * 1024**3,
+        node_cpu_millicores=2000, node_mem_bytes=8 * 1024**3,
+        current_size=1, config=_up_config(max_size=2),
+    )
+
+    assert decision.should_scale is True
+    assert decision.direction == "up"
+    assert decision.capped is True
+
+
+def test_already_at_max_size_is_a_capped_up_decision():
+    decision = decide(
+        pending_count=4, sum_cpu_millicores=8000, sum_mem_bytes=32 * 1024**3,
+        node_cpu_millicores=2000, node_mem_bytes=8 * 1024**3,
+        current_size=2, config=_up_config(max_size=2),
+    )
+
+    assert decision.should_scale is False
+    assert decision.direction == "up"
+    assert decision.capped is True
+
+
+def test_no_pending_pods_is_a_none_direction_decision():
+    decision = decide(
+        pending_count=0, sum_cpu_millicores=0, sum_mem_bytes=0,
+        node_cpu_millicores=2000, node_mem_bytes=8 * 1024**3,
+        current_size=1, config=_up_config(max_size=10),
+    )
+
+    assert decision.direction == "none"
+    assert decision.capped is False
+
+
+def test_manual_scale_clamped_by_max_size_is_capped():
+    decision = decide_manual(nodes_to_add=5, current_size=1, max_size=3)
+
+    assert decision.direction == "up"
+    assert decision.capped is True
+
+
+def test_manual_scale_within_max_size_is_not_capped():
+    decision = decide_manual(nodes_to_add=2, current_size=1, max_size=10)
+
+    assert decision.direction == "up"
+    assert decision.capped is False
+
+
+def test_scale_down_clamped_by_min_size_is_capped():
+    decision = decide_scale_down(empty_node_count=5, current_size=4, min_size=2)
+
+    assert decision.should_scale is True
+    assert decision.direction == "down"
+    assert decision.capped is True
+
+
+def test_scale_down_within_min_size_is_not_capped():
+    decision = decide_scale_down(empty_node_count=2, current_size=5, min_size=1)
+
+    assert decision.direction == "down"
+    assert decision.capped is False
+
+
+def test_nothing_to_scale_down_is_a_none_direction_decision():
+    decision = decide_scale_down(empty_node_count=0, current_size=3, min_size=1)
+
+    assert decision.direction == "none"
+    assert decision.capped is False

@@ -153,3 +153,91 @@ def test_capture_connection_rejects_unknown_endpoint_type():
         c._capture_connection(
             MagicMock(Get=MagicMock(return_value=cluster)), "public"
         )
+
+import pytest
+
+from app import metrics
+
+
+@pytest.fixture
+def fresh_metrics():
+    metrics.reset()
+    yield metrics
+
+
+def _sample(name, **labels):
+    return metrics.registry.get_sample_value(name, labels or None)
+
+
+def test_get_current_size_failure_counts_a_get_size_error(fresh_metrics):
+    yc = _yc()
+    yc._svc.Get.side_effect = RuntimeError("grpc down")
+
+    with pytest.raises(RuntimeError):
+        yc.get_current_size()
+
+    assert _sample("litescaler_yc_api_errors_total", op="get_size") == 1
+
+
+def test_set_size_failure_counts_an_update_error(fresh_metrics):
+    yc = _yc()
+    yc._svc.Update.side_effect = RuntimeError("grpc down")
+
+    with pytest.raises(RuntimeError):
+        yc.set_size(3)
+
+    assert _sample("litescaler_yc_api_errors_total", op="update") == 1
+
+
+def test_operation_lookup_failure_counts_a_get_operation_error(fresh_metrics):
+    yc = _yc()
+    yc._last_operation_id = "op-123"
+    yc._ops.Get.side_effect = RuntimeError("grpc down")
+
+    with pytest.raises(RuntimeError):
+        yc.operation_in_progress()
+
+    assert _sample("litescaler_yc_api_errors_total", op="get_operation") == 1
+
+
+def test_successful_calls_count_no_errors(fresh_metrics):
+    yc = _yc()
+    yc._svc.Get.return_value = SimpleNamespace(
+        scale_policy=SimpleNamespace(fixed_scale=SimpleNamespace(size=4))
+    )
+
+    assert yc.get_current_size() == 4
+    assert _sample("litescaler_yc_api_errors_total", op="get_size") is None
+
+
+def _credentials(monkeypatch):
+    creds = YcKubeCredentials.__new__(YcKubeCredentials)
+    creds._sa_key = {
+        "service_account_id": "sa-1", "id": "key-1", "private_key": "pk",
+    }
+    creds._iam = MagicMock()
+    creds._token = None
+    creds._token_expiry = 0.0
+    monkeypatch.setattr("app.yc.jwt.encode", lambda *a, **kw: "signed-jwt")
+    return creds
+
+
+def test_minting_a_token_counts_a_mint(monkeypatch, fresh_metrics):
+    creds = _credentials(monkeypatch)
+    creds._iam.Create.return_value = SimpleNamespace(
+        iam_token="tok", expires_at=SimpleNamespace(seconds=9999, nanos=0)
+    )
+
+    assert creds.get_token() == "tok"
+    assert _sample("litescaler_iam_token_mints_total") == 1
+
+
+def test_a_failed_mint_counts_an_iam_token_error(monkeypatch, fresh_metrics):
+    creds = _credentials(monkeypatch)
+    creds._iam.Create.side_effect = RuntimeError("iam down")
+
+    with pytest.raises(RuntimeError):
+        creds.get_token()
+
+    assert _sample("litescaler_yc_api_errors_total", op="iam_token") == 1
+    assert _sample("litescaler_iam_token_mints_total") == 0

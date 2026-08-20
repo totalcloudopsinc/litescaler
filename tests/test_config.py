@@ -216,3 +216,41 @@ def test_log_level_defaults_to_info_and_rejects_unknown():
 def test_kubernetes_config_no_longer_has_kubeconfig():
     from app.config import KubernetesConfig
     assert "kubeconfig" not in KubernetesConfig.model_fields
+
+
+_MINIMAL = """
+yandex_cloud:
+  service_account_key_file: /secrets/sa-key.json
+  node_group_id: cat123
+  cluster_id: cl-abc
+kubernetes:
+  namespace: ml
+  label_selectors:
+    - team=ml
+scaling:
+  max_size: 20
+"""
+
+
+def _write(tmp_path, body):
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(textwrap.dedent(body))
+    return load_config(str(cfg_file))
+
+
+def test_metrics_defaults_to_enabled_on_port_9090(tmp_path):
+    config = _write(tmp_path, _MINIMAL)
+
+    assert config.metrics.enabled is True
+    assert config.metrics.port == 9090
+
+
+def test_metrics_section_overrides_the_defaults(tmp_path):
+    config = _write(tmp_path, _MINIMAL + """
+metrics:
+  enabled: false
+  port: 9110
+""")
+
+    assert config.metrics.enabled is False
+    assert config.metrics.port == 9110

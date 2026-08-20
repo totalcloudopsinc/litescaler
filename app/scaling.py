@@ -21,6 +21,8 @@ class Decision:
     nodes_to_add: int
     pending_count: int
     reason: str
+    direction: str = "none"
+    capped: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,8 @@ def decide(
                 f"already at max_size {config.max_size}; cannot add "
                 f"{nodes_needed} needed nodes"
             ),
+            direction="up",
+            capped=True,
         )
 
     if fit_nodes > demand_nodes:
@@ -216,6 +220,8 @@ def decide(
         nodes_to_add=nodes_to_add,
         pending_count=pending_count,
         reason=reason,
+        direction="up",
+        capped=uncapped_target > config.max_size,
     )
 
 
@@ -240,6 +246,8 @@ def decide_manual(
                 f"manual scale: already at max_size {max_size}; "
                 f"cannot add {nodes_to_add} nodes"
             ),
+            direction="up",
+            capped=True,
         )
 
     if actual_add < nodes_to_add:
@@ -260,6 +268,8 @@ def decide_manual(
         nodes_to_add=actual_add,
         pending_count=0,
         reason=reason,
+        direction="up",
+        capped=actual_add < nodes_to_add,
     )
 
 
@@ -299,4 +309,6 @@ def decide_scale_down(
             f"{empty_node_count} empty nodes idle; scaling down "
             f"{current_size} -> {target} (min_size {min_size})"
         ),
+        direction="down",
+        capped=current_size - empty_node_count < min_size,
     )

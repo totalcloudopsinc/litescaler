@@ -410,3 +410,140 @@ def test_from_config_wires_yc_credentials_into_kube_client(monkeypatch):
         config.yandex_cloud.node_group_id,
     )
     assert svc.config is config
+
+import pytest
+
+from app import metrics
+
+
+@pytest.fixture
+def fresh_metrics():
+    metrics.reset()
+    yield metrics
+
+
+def _sample(name, **labels):
+    return metrics.registry.get_sample_value(name, labels or None)
+
+
+def _flat_requests(monkeypatch, cpu=2000, mem=1024**3):
+    monkeypatch.setattr(
+        "app.service.sum_pod_requests",
+        lambda p: (cpu * len(p), mem * len(p)),
+    )
+
+
+def test_evaluate_publishes_the_poll_input_gauges(monkeypatch, fresh_metrics):
+    config = _config()
+    svc, kube, yc = _service(config, _pods(2), (4000, 16 * 1024**3), 2)
+    kube.group_free_capacity.return_value = [NodeFree("n1", 500, 2 * 1024**3)]
+    _flat_requests(monkeypatch)
+
+    svc.evaluate()
+
+    assert _sample("litescaler_pending_pods") == 2
+    assert _sample("litescaler_pending_demand_cpu_millicores") == 4000
+    assert _sample("litescaler_pending_demand_memory_bytes") == 2 * 1024**3
+    assert _sample("litescaler_group_free_cpu_millicores") == 500
+    assert _sample("litescaler_group_free_memory_bytes") == 2 * 1024**3
+    assert _sample("litescaler_node_capacity_cpu_millicores") == 4000
+    assert _sample("litescaler_node_capacity_memory_bytes") == 16 * 1024**3
+    assert _sample("litescaler_node_group_size") == 2
+    assert _sample("litescaler_ready_nodes") == 2
+    assert _sample("litescaler_resize_in_progress") == 0
+
+
+def test_evaluate_counts_nodes_added_when_a_resize_is_applied(
+    monkeypatch, fresh_metrics
+):
+    config = _config()
+    svc, kube, yc = _service(config, _pods(4), (4000, 16 * 1024**3), 2)
+    _flat_requests(monkeypatch)
+
+    svc.evaluate()
+
+    assert _sample(
+        "litescaler_scale_decisions_total", direction="up", result="applied"
+    ) == 1
+    assert _sample("litescaler_nodes_added_total", node_group_id="cat1") == 3
+
+
+def test_dry_run_evaluate_records_a_dry_run_decision_and_no_nodes_added(
+    monkeypatch, fresh_metrics
+):
+    config = _config(dry_run=True)
+    svc, kube, yc = _service(config, _pods(4), (4000, 16 * 1024**3), 2)
+    _flat_requests(monkeypatch)
+
+    svc.evaluate()
+
+    assert _sample(
+        "litescaler_scale_decisions_total", direction="up", result="dry_run"
+    ) == 1
+    assert _sample("litescaler_nodes_added_total", node_group_id="cat1") is None
+
+
+def test_a_transitioning_group_is_gated_as_transitioning(
+    monkeypatch, fresh_metrics
+):
+    config = _config()
+    svc, kube, yc = _service(
+        config, _pods(2), (4000, 16 * 1024**3), 4, ready_nodes=2
+    )
+    _flat_requests(monkeypatch)
+
+    svc.evaluate()
+
+    assert _sample(
+        "litescaler_evaluations_gated_total", reason="transitioning"
+    ) == 1
+    assert _sample(
+        "litescaler_scale_decisions_total", direction="none", result="gated"
+    ) == 1
+
+
+def test_a_running_resize_operation_is_gated_as_operation_in_progress(
+    monkeypatch, fresh_metrics,
+):
+    config = _config()
+    svc, kube, yc = _service(config, _pods(2), (4000, 16 * 1024**3), 2)
+    yc.operation_in_progress.return_value = True
+    _flat_requests(monkeypatch)
+
+    svc.evaluate()
+
+    assert _sample(
+        "litescaler_evaluations_gated_total", reason="operation_in_progress"
+    ) == 1
+    assert _sample("litescaler_resize_in_progress") == 1
+
+
+def test_manual_scale_counts_nodes_added(fresh_metrics):
+    config = _config()
+    svc, kube, yc = _service(config, [], (4000, 16 * 1024**3), 2)
+
+    svc.scale_by(3)
+
+    assert _sample(
+        "litescaler_scale_decisions_total", direction="up", result="applied"
+    ) == 1
+    assert _sample("litescaler_nodes_added_total", node_group_id="cat1") == 3
+
+
+def test_a_gated_poll_leaves_the_unmeasured_capacity_gauges_alone(
+    monkeypatch, fresh_metrics
+):
+    config = _config()
+    svc, kube, yc = _service(config, _pods(2), (4000, 16 * 1024**3), 2)
+    kube.group_free_capacity.return_value = [NodeFree("n1", 500, 2 * 1024**3)]
+    _flat_requests(monkeypatch)
+    svc.evaluate()
+
+    yc.operation_in_progress.return_value = True
+    svc.evaluate()
+
+    assert _sample("litescaler_group_free_cpu_millicores") == 500
+    assert _sample("litescaler_group_free_memory_bytes") == 2 * 1024**3
+    assert _sample("litescaler_node_capacity_cpu_millicores") == 4000
+    assert _sample("litescaler_pending_pods") == 2
+    assert _sample("litescaler_resize_in_progress") == 1
