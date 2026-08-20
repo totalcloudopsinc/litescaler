@@ -5,7 +5,6 @@ namespace: kube-system
 
 resources:
   - ../../base
-  - podmonitor.yaml
 
 patches:
   - path: config-patch.yaml
