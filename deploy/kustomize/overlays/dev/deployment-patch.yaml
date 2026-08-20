@@ -6,4 +6,9 @@ spec:
   template:
     spec:
       nodeSelector:
-        REPLACE_WITH_NODE_LABEL_KEY: REPLACE_WITH_NODE_LABEL_VALUE
+        lite-scaler: "true"
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: lite-scaler
+          effect: NoSchedule
